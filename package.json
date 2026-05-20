@@ -1,0 +1,13 @@
+{
+  "name": "ai-factory-cli",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "worker": "node src/worker.js",
+    "scope": "node orchestrator/scope-pipeline.js",
+    "develop": "node orchestrator/develop-next.js",
+    "task": "node orchestrator/run-task.js",
+    "test": "node --test orchestrator/*.test.js orchestrator/agent-roles.test.js orchestrator/project-paths-tenant.test.js"
+  },
+  "dependencies": {}
+}
