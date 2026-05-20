@@ -15,10 +15,17 @@ if (-not (Test-Path $EnvFile)) {
 $Name = "aifactory-cli-$TenantId"
 docker rm -f $Name 2>$null
 
+$NetworkArg = @()
+if ($env:AIFACTORY_DOCKER_NETWORK) {
+  $NetworkArg = @("--network", $env:AIFACTORY_DOCKER_NETWORK)
+}
+
 docker run -d --name $Name `
   --env-file $EnvFile `
   -v "${Root}\data\tenants\${TenantId}:/app/data/tenants/${TenantId}" `
   --add-host=host.docker.internal:host-gateway `
+  @NetworkArg `
   $Image
 
 Write-Host "Worker $Name iniciado."
+Write-Host "Redis no .env do tenant deve ser acessivel do container (ex.: redis://host.docker.internal:6379, nao 127.0.0.1)."

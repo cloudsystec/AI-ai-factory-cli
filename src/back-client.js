@@ -67,6 +67,17 @@ export async function heartbeat() {
 
 /**
  * @param {string} slug
+ * @returns {Promise<{ slug: string, name: string, scopeMd: string }>}
+ */
+export async function getProjectFromBack(slug) {
+  const res = await backFetch(
+    `/worker/projects/${encodeURIComponent(slug)}`
+  );
+  return res.json();
+}
+
+/**
+ * @param {string} slug
  * @param {{ tasks: unknown, scopeState: unknown }} body
  */
 export async function putProjectDashboard(slug, body) {

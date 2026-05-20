@@ -12,10 +12,10 @@ import {
 import { readBacklogFile } from "./backlog-io.js";
 import { clearQaVerdict, readQaVerdict, qaVerdictFile } from "./qa-verdict.js";
 import { readAgentFile, readGlobalRules } from "./agent-prompts.js";
+import { cursorAgentArgv, cursorCommand } from "./cursor-agent-cli.js";
 
 const project = process.argv[2];
 const taskId = process.argv[3];
-const cursorCommand = process.env.CURSOR_AGENT || "cursor-agent";
 
 if (!project || !taskId || !isValidProjectSlug(project)) {
     console.error("Uso: node orchestrator/run-task.js <projeto> <TASK-ID>");
@@ -118,11 +118,12 @@ ${instruction}
 
     console.log(`\n=== Rodando ${agentName} ===\n`);
 
-    execFileSync(cursorCommand, [], {
+    execFileSync(cursorCommand(), cursorAgentArgv(), {
         input: prompt,
         stdio: ["pipe", "inherit", "inherit"],
         cwd: process.cwd(),
         shell: true,
+        env: process.env,
     });
 }
 

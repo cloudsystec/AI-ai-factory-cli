@@ -15,9 +15,15 @@ if [[ ! -f "$ENV_FILE" ]]; then
 fi
 NAME="aifactory-cli-${TENANT_ID}"
 docker rm -f "$NAME" 2>/dev/null || true
+NETWORK_ARGS=()
+if [[ -n "${AIFACTORY_DOCKER_NETWORK:-}" ]]; then
+  NETWORK_ARGS=(--network "$AIFACTORY_DOCKER_NETWORK")
+fi
 docker run -d --name "$NAME" \
   --env-file "$ENV_FILE" \
   -v "$ROOT/data/tenants/$TENANT_ID:/app/data/tenants/$TENANT_ID" \
   --add-host=host.docker.internal:host-gateway \
+  "${NETWORK_ARGS[@]}" \
   "$IMAGE"
 echo "Worker $NAME iniciado."
+echo "Redis no .env do tenant: use host.docker.internal no Docker (nao 127.0.0.1)."

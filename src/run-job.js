@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import { REPO_ROOT, orchestratorImport } from "./repo-root.js";
 import { getDevelopSettingsFromBack } from "./back-client.js";
+import { ensureTenantProjectReady } from "./ensure-tenant-project.js";
 
 export { REPO_ROOT };
 
@@ -16,6 +17,17 @@ export async function runJobLocally(job, onLine) {
   }
 
   const project = job.projectSlug;
+  const needsMacro = new Set([
+    "scope",
+    "scope-tasks-only",
+    "develop",
+    "task",
+  ]).has(job.kind);
+
+  if (needsMacro && project) {
+    await ensureTenantProjectReady(project, onLine);
+  }
+
   if (job.kind === "develop" && project) {
     try {
       const { writeDevelopSettings } = await orchestratorImport(
@@ -80,14 +92,14 @@ export async function runJobLocally(job, onLine) {
  * @param {(line: string) => void} onLine
  */
 async function runProvisionJob(job, onLine) {
-  const { createProject } = await orchestratorImport("create-project.js");
+  const { ensureProjectFiles } = await orchestratorImport("create-project.js");
   const payload = job.payload || {};
   const slug = payload.slug || job.projectSlug;
   const name = payload.name || slug;
   const scope = payload.scope || "";
   onLine(`Provisionando projeto ${slug}…\n`);
   try {
-    const created = createProject({ name, slug, scope });
+    const created = ensureProjectFiles({ name, slug, scope });
     onLine(`Projeto criado: ${created.project}\n`);
     return { exitCode: 0, status: "succeeded" };
   } catch (e) {

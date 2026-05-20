@@ -6,11 +6,21 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /** Raiz do repo CLI (`orchestrator/` na raiz deste repo). */
 export function resolveRepoRoot() {
-  const root = path.resolve(__dirname, "..");
-  if (!fs.existsSync(path.join(root, "orchestrator"))) {
-    throw new Error("orchestrator/ não encontrado na raiz do repo CLI");
+  const candidates = [
+    process.env.AI_FACTORY_CLI_ROOT,
+    path.resolve(__dirname, ".."),
+  ].filter(Boolean);
+
+  for (const root of candidates) {
+    const resolved = path.resolve(root);
+    if (fs.existsSync(path.join(resolved, "orchestrator"))) {
+      return resolved;
+    }
   }
-  return root;
+
+  throw new Error(
+    "orchestrator/ não encontrado na raiz do repo CLI (defina AI_FACTORY_CLI_ROOT se necessário)"
+  );
 }
 
 export const REPO_ROOT = resolveRepoRoot();

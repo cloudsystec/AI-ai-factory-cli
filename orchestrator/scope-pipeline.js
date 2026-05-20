@@ -9,6 +9,7 @@ import {
   microScopeFile,
 } from "./project-paths.js";
 import { readAgentFile, readGlobalRules } from "./agent-prompts.js";
+import { cursorAgentArgv, cursorCommand } from "./cursor-agent-cli.js";
 import { readBacklogFile, writeBacklogFile } from "./backlog-io.js";
 import {
   readMicrosFromPath,
@@ -24,7 +25,6 @@ const positionalArgs = argvRaw.filter((a) => !a.startsWith("--"));
 const project = positionalArgs[0];
 const macroId = positionalArgs[1];
 
-const cursorCommand = process.env.CURSOR_AGENT || "cursor-agent";
 const MAX_VALIDATION_ROUNDS = 3;
 
 if (!project || !macroId) {
@@ -127,11 +127,12 @@ ${prompt}
     return;
   }
 
-  execFileSync(cursorCommand, [], {
+  execFileSync(cursorCommand(), cursorAgentArgv(), {
     input: fullPrompt,
     stdio: ["pipe", "inherit", "inherit"],
     cwd: process.cwd(),
     shell: true,
+    env: process.env,
   });
 }
 
@@ -292,8 +293,9 @@ Crie o relatório:
 ${path.join(reportsScopesDir, `${macroId}-macro-to-micro.md`)}
 
 Regras:
-- Cada micro = fatia de **produto testável** (comportamento no sistema após implementação); evite micros que só produzem papel sem caminho claro para código/testes.
-- Gere microescopos funcionais.
+- **3 a 7 microescopos** (trilhas de entrega), no máximo 8; não atomize em dezenas de passos técnicos estreitos.
+- Cada micro = direção para **produção**, **correção** ou **melhoria verificável** do sistema; descrições concisas (a IA de implementação detalha o técnico).
+- Evite micros que só produzem papel sem caminho claro para código/testes.
 - Não gere tasks ainda.
 - Não implemente código.
 - O arquivo deve ser JSON válido.
@@ -568,8 +570,10 @@ Formato obrigatório do backlog:
 }
 
 Regras:
-- Tasks devem majoritariamente gerar **mudança em código** (\`src/\` ou equivalente no projeto) ou **testes automatizados**; \`docs/\` apenas como suporte à evidência, não como única entrega.
-- Gere tasks pequenas, entregáveis e testáveis **somente** para o microescopo ALVO (id: ${targetMicro.id}).
+- **1–2 tasks por micro** (máximo 3); prefira menos tasks mais capazes a muitas micro-tarefas.
+- Tasks devem gerar **mudança em código** (\`src/\` ou equivalente) ou **testes**; \`docs/\` só como suporte, não entrega única.
+- Critérios de aceite claros mas não hiper-prescritivos (sem listar cada ficheiro salvo quando crítico).
+- Gere tasks entregáveis **somente** para o microescopo ALVO (id: ${targetMicro.id}).
 - Toda task nova deve ter sourceMicroId exatamente igual a "${targetMicro.id}".
 - Não crie tasks para outros microescopos nesta execução.
 - Não duplique tasks existentes.

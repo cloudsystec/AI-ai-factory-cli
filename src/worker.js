@@ -1,18 +1,12 @@
-import "dotenv/config";
+import dotenv from "dotenv";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  claimJob,
-  completeJob,
-  heartbeat,
-  postLog,
-  registerWorker,
-} from "./back-client.js";
-import { runJobLocally, REPO_ROOT } from "./run-job.js";
-import { reportProjectDashboard } from "./report-dashboard.js";
-import { syncTenantAgentsToDisk } from "./sync-tenant-agents.js";
+import { resolveRepoRoot } from "./repo-root.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = resolveRepoRoot();
+
+dotenv.config();
 
 function requireEnv(name) {
   const v = process.env[name];
@@ -22,10 +16,29 @@ function requireEnv(name) {
 
 const TENANT_ID = requireEnv("TENANT_ID");
 const tenantRoot = path.join(REPO_ROOT, "data", "tenants", TENANT_ID);
+dotenv.config({
+  path: path.join(tenantRoot, ".env"),
+  override: false,
+});
 process.env.AI_FACTORY_TENANT_ROOT = tenantRoot;
 process.env.AI_FACTORY_WORKSPACES_DIR = path.join(tenantRoot, "workspaces");
 process.env.AI_FACTORY_MACRO_DIR = path.join(tenantRoot, "scopes", "macro");
 process.env.AI_FACTORY_AGENTS_DIR = path.join(tenantRoot, "agents");
+
+const {
+  claimJob,
+  completeJob,
+  heartbeat,
+  registerWorker,
+} = await import("./back-client.js");
+const {
+  appendJobLogLine,
+  publishJobLogEvent,
+  resetJobLog,
+} = await import("./job-log-redis.js");
+const { runJobLocally } = await import("./run-job.js");
+const { reportProjectDashboard } = await import("./report-dashboard.js");
+const { syncTenantAgentsToDisk } = await import("./sync-tenant-agents.js");
 
 const WORKER_ID = process.env.WORKER_ID || `cli-${TENANT_ID.slice(0, 8)}`;
 const POLL_MS = Number(process.env.CLAIM_POLL_MS || 3000);
@@ -35,11 +48,20 @@ let running = false;
 async function processOneJob(job) {
   running = true;
   try {
-    await postLog(job.id, `Worker ${WORKER_ID} iniciou job ${job.kind}`);
+    await resetJobLog(job.id);
+    await appendJobLogLine(
+      job.id,
+      `Worker ${WORKER_ID} iniciou job ${job.kind}`
+    );
     const result = await runJobLocally(job, (line) => {
-      postLog(job.id, line).catch((e) =>
+      appendJobLogLine(job.id, line).catch((e) =>
         console.error("log failed", e.message)
       );
+    });
+    await publishJobLogEvent(job.id, {
+      type: "exit",
+      code: result.exitCode ?? null,
+      signal: null,
     });
     await completeJob(job.id, {
       status: result.status,
@@ -53,10 +75,15 @@ async function processOneJob(job) {
         console.warn("report dashboard:", e.message)
       );
     }
-    await postLog(job.id, `Job finalizado: ${result.status}`);
+    await appendJobLogLine(job.id, `Job finalizado: ${result.status}`);
   } catch (e) {
     console.error(e);
     try {
+      await publishJobLogEvent(job.id, {
+        type: "exit",
+        code: 1,
+        signal: null,
+      });
       await completeJob(job.id, {
         status: "failed",
         exitCode: 1,
@@ -88,7 +115,13 @@ async function loop() {
 }
 
 async function main() {
-  console.log("CLI worker", { TENANT_ID, BACK_URL: process.env.BACK_URL, REPO_ROOT });
+  requireEnv("REDIS_URL");
+  console.log("CLI worker", {
+    TENANT_ID,
+    BACK_URL: process.env.BACK_URL,
+    REDIS_URL: process.env.REDIS_URL,
+    REPO_ROOT,
+  });
   const n = await syncTenantAgentsToDisk(tenantRoot);
   console.log(`Agent prompts sincronizados: ${n} ficheiros em ${tenantRoot}`);
   await registerWorker(WORKER_ID);

@@ -79,3 +79,59 @@ export function createProject(input) {
     },
   };
 }
+
+/**
+ * Garante macro + workspace no volume do tenant (idempotente; só cria o que falta).
+ * @param {{ name: string, slug: string, scope: string }} input
+ */
+export function ensureProjectFiles(input) {
+  const name = String(input?.name ?? "").trim();
+  const slug = String(input?.slug ?? "").trim();
+  const scope = String(input?.scope ?? "").trim();
+
+  if (!name || !scope || !slug) {
+    throw new Error("name, slug e scope são obrigatórios");
+  }
+  if (!isValidProjectSlug(slug)) {
+    throw new Error(`Slug inválido: "${slug}"`);
+  }
+
+  const macroPath = macroScopeFile(slug, slug);
+  const wsRoot = workspaceRoot(slug);
+  const created = { macro: false, workspace: false };
+
+  if (!fs.existsSync(macroPath)) {
+    fs.mkdirSync(path.dirname(macroPath), { recursive: true });
+    fs.writeFileSync(macroPath, `# ${name}\n\n${scope}\n`, "utf-8");
+    created.macro = true;
+  }
+
+  ensureScopePipelineDirs(slug);
+
+  if (!fs.existsSync(wsRoot)) {
+    fs.mkdirSync(wsRoot, { recursive: true });
+    created.workspace = true;
+  }
+
+  const bp = backlogFile(slug);
+  if (!fs.existsSync(bp)) {
+    writeBacklogFile(bp, {
+      project: slug,
+      macroId: slug,
+      tasks: [],
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  const statePath = taskStateFile(slug);
+  if (!fs.existsSync(statePath)) {
+    fs.writeFileSync(statePath, "[]\n", "utf-8");
+  }
+
+  const devPath = path.join(wsRoot, "develop-settings.json");
+  if (!fs.existsSync(devPath)) {
+    writeDevelopSettings(slug, { autorun: false });
+  }
+
+  return { project: slug, macroId: slug, name, created, macroPath };
+}

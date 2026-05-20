@@ -7,13 +7,18 @@ const orchestratorDir = path.dirname(fileURLToPath(import.meta.url));
 /** Raiz do repositório (pai de `orchestrator/`). */
 export const repoRoot = path.resolve(orchestratorDir, "..");
 
-const workspacesDir = process.env.AI_FACTORY_WORKSPACES_DIR
-  ? path.resolve(process.env.AI_FACTORY_WORKSPACES_DIR)
-  : path.join(repoRoot, "workspaces");
+/** Lê env em tempo de chamada (worker define AI_FACTORY_* após imports). */
+function resolveWorkspacesDir() {
+  return process.env.AI_FACTORY_WORKSPACES_DIR
+    ? path.resolve(process.env.AI_FACTORY_WORKSPACES_DIR)
+    : path.join(repoRoot, "workspaces");
+}
 
-const macroScopesDir = process.env.AI_FACTORY_MACRO_DIR
-  ? path.resolve(process.env.AI_FACTORY_MACRO_DIR)
-  : path.join(repoRoot, "scopes", "macro");
+function resolveMacroScopesDir() {
+  return process.env.AI_FACTORY_MACRO_DIR
+    ? path.resolve(process.env.AI_FACTORY_MACRO_DIR)
+    : path.join(repoRoot, "scopes", "macro");
+}
 
 /**
  * Raiz do volume do tenant (AGENTS.md + agents/ + workspaces/).
@@ -70,7 +75,7 @@ export function isValidProjectSlug(project) {
  * @param {string} project
  */
 export function workspaceRoot(project) {
-  return path.join(workspacesDir, project);
+  return path.join(resolveWorkspacesDir(), project);
 }
 
 /**
@@ -102,12 +107,12 @@ export function developSettingsFile(project) {
  * @param {string} macroId
  */
 export function macroScopeFile(_project, macroId) {
-  return path.join(macroScopesDir, `${macroId}.md`);
+  return path.join(resolveMacroScopesDir(), `${macroId}.md`);
 }
 
 /** Diretório `scopes/macro` (raiz do repo ou `AI_FACTORY_MACRO_DIR`). */
 export function repoMacroScopesDir() {
-  return macroScopesDir;
+  return resolveMacroScopesDir();
 }
 
 /**
@@ -184,6 +189,7 @@ export function ensureScopePipelineDirs(project) {
  * Lista slugs de projetos em `workspaces/` (diretório com package.json ou backlog).
  */
 export function listWorkspaceProjects() {
+  const workspacesDir = resolveWorkspacesDir();
   if (!fs.existsSync(workspacesDir)) return [];
   const names = fs.readdirSync(workspacesDir, { withFileTypes: true });
   return names
