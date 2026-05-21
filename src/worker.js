@@ -92,6 +92,7 @@ async function finishJobWithBilling(jobId, opts) {
     billing = await resolveJobCostBaseUsd({
       startedMs: opts.startedMs,
       finishedMs: opts.finishedMs,
+      email: opts.billingEmail,
     });
   }
 
@@ -125,6 +126,11 @@ async function processOneJob(job) {
   const projectSlug =
     job.projectSlug ||
     (job.kind === "provision" ? job.payload?.slug : null);
+
+  const prevUsageEmail = process.env.CURSOR_USAGE_EMAIL;
+  if (job.requestedByEmail) {
+    process.env.CURSOR_USAGE_EMAIL = job.requestedByEmail;
+  }
 
   /** @type {ReturnType<typeof setInterval>|null} */
   let dashboardTimer = null;
@@ -196,6 +202,7 @@ async function processOneJob(job) {
       exitCode: result.exitCode,
       startedMs: jobStartedMs,
       finishedMs,
+      billingEmail: job.requestedByEmail,
     });
     await appendJobLogLine(job.id, `Job finalizado: ${result.status}`);
   } catch (e) {
@@ -212,6 +219,7 @@ async function processOneJob(job) {
         exitCode: 1,
         startedMs: jobStartedMs,
         finishedMs,
+        billingEmail: job.requestedByEmail,
       });
     } catch (e2) {
       console.error("complete failed", e2);
@@ -225,6 +233,13 @@ async function processOneJob(job) {
         taskId: job.taskId || undefined,
         jobId: job.id,
       }).catch((e) => console.warn("dashboard sync (finally):", e.message));
+    }
+    if (job.requestedByEmail) {
+      if (prevUsageEmail !== undefined) {
+        process.env.CURSOR_USAGE_EMAIL = prevUsageEmail;
+      } else {
+        delete process.env.CURSOR_USAGE_EMAIL;
+      }
     }
     running = false;
   }

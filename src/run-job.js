@@ -53,7 +53,7 @@ export async function runJobLocally(job, onLine) {
     ...process.env,
     AI_FACTORY_WORKSPACES_DIR: process.env.AI_FACTORY_WORKSPACES_DIR,
     AI_FACTORY_MACRO_DIR: process.env.AI_FACTORY_MACRO_DIR,
-    CURSOR_API_KEY: process.env.CURSOR_API_KEY,
+    CURSOR_API_KEY: job.cursorApiKey || undefined,
     AI_FACTORY_JOB_ID: job.id,
     ...(billingSessionDir
       ? { AI_FACTORY_BILLING_SESSION_DIR: billingSessionDir }

@@ -17,12 +17,12 @@ Este repositório é o **cliente** que corre na infraestrutura do tenant (ou do 
 |---------|----------|--------|
 | **Backend** (API) | `BACK_URL` | URL publicada (ex. `http://host.docker.internal:4000` em dev Docker) |
 | **Redis** (logs) | `REDIS_URL` | **Docker (worker):** `redis://host.docker.internal:6379` se Redis no PC; **N8N:** `redis://redis-stack:6379`. Não uses `127.0.0.1` dentro do container. |
-| **Cursor** | `CURSOR_API_KEY` | Chave do tenant (gravada no back, exportada por `pull-tenant-env`) |
-| **Cursor Admin API** | `CURSOR_ADMIN_API_KEY` | Chave **Admin** (Enterprise) para `POST /teams/filtered-usage-events` — billing real por job |
-| **Billing** | `CURSOR_USAGE_EMAIL` | Filtra eventos por email na Admin API (opcional mas recomendado) |
+| **Cursor Admin API** | `CURSOR_ADMIN_API_KEY` | Chave **Admin** do tenant (gravada no back, exportada por `pull-tenant-env`) — billing via Admin API |
+| **Cursor (execução)** | *(por job)* | `CURSOR_API_KEY` do **executor** que iniciou o job — enviada no `POST /worker/claim`, não no `.env` |
+| **Billing** | `CURSOR_USAGE_EMAIL` | Definido automaticamente com o email do executor do job (override opcional no `.env`) |
 | **Cursor CLI** | `CURSOR_AGENT` (opcional) | Default na imagem: `agent` |
 
-Sem `REDIS_URL` o worker não arranca. Sem `CURSOR_API_KEY` os jobs que usam agentes falham.
+Sem `REDIS_URL` o worker não arranca. Jobs de pipeline exigem API key Cursor configurada no executor (admin plataforma).
 
 **Billing (por chamada e por rodada):** cada invocação do Cursor CLI regista timestamp local; ao fim de cada rodada (escopo fase 1 / fases 2–3 / onda micro 4–6, ou pipeline de uma task) o orquestrador consulta a Admin API e faz **match** dos eventos por timestamp mais próximo (com cluster para vários eventos na mesma chamada). O CB do job é a **soma das rodadas** em `data/tenants/<id>/billing-sessions/<jobId>.jsonl`. Sem sessão de rodadas, o worker usa fallback na janela do job (`[início−2min, fim+1min]`).
 
@@ -67,7 +67,7 @@ cd ../ai-factory-back
 npm run pull-tenant-env -- <tenant-uuid>
 ```
 
-Cria `ai-factory-cli/data/tenants/<uuid>/.env` com `TENANT_ID`, `BACK_URL`, `WORKER_SECRET`, `REDIS_URL` (via `TENANT_REDIS_URL` no `.env` do back), `CURSOR_API_KEY` (se existir na BD).
+Cria `ai-factory-cli/data/tenants/<uuid>/.env` com `TENANT_ID`, `BACK_URL`, `WORKER_SECRET`, `REDIS_URL` e `CURSOR_ADMIN_API_KEY` (se existir na BD). A API key de execução vem por job no claim.
 
 ### 2. Build da imagem
 
