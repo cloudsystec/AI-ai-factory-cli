@@ -33,16 +33,30 @@ export function tenantRoot() {
   return repoRoot;
 }
 
-/** Diretório agents/ do tenant ou repo. */
+/** Slug do projeto ativo (definido pelo worker em cada job). */
+export function activeProjectSlug() {
+  const slug = process.env.AI_FACTORY_ACTIVE_PROJECT?.trim();
+  return slug && isValidProjectSlug(slug) ? slug : null;
+}
+
+/** Diretório agents/ do projeto ativo ou legado no tenant. */
 export function agentsDir() {
   if (process.env.AI_FACTORY_AGENTS_DIR) {
     return path.resolve(process.env.AI_FACTORY_AGENTS_DIR);
   }
+  const project = activeProjectSlug();
+  if (project) {
+    return path.join(workspaceRoot(project), "agents");
+  }
   return path.join(tenantRoot(), "agents");
 }
 
-/** AGENTS.md (regras globais). */
+/** AGENTS.md (regras globais do projeto ou legado no tenant). */
 export function globalAgentsFile() {
+  const project = activeProjectSlug();
+  if (project) {
+    return path.join(workspaceRoot(project), "AGENTS.md");
+  }
   if (process.env.AI_FACTORY_TENANT_ROOT) {
     return path.join(path.resolve(process.env.AI_FACTORY_TENANT_ROOT), "AGENTS.md");
   }
@@ -57,8 +71,24 @@ export function agentFilePath(relativePath) {
   if (normalized === "AGENTS.md") {
     return globalAgentsFile();
   }
+  const project = activeProjectSlug();
+  if (project) {
+    if (normalized.startsWith("agents/")) {
+      const projectPath = path.join(workspaceRoot(project), normalized);
+      if (fs.existsSync(projectPath)) return projectPath;
+    } else {
+      const projectPath = path.join(workspaceRoot(project), "agents", path.basename(normalized));
+      if (fs.existsSync(projectPath)) return projectPath;
+    }
+  }
   if (normalized.startsWith("agents/")) {
-    return path.join(tenantRoot(), normalized);
+    const legacy = path.join(tenantRoot(), normalized);
+    if (fs.existsSync(legacy)) return legacy;
+  }
+  const legacyFlat = path.join(tenantRoot(), "agents", path.basename(normalized));
+  if (fs.existsSync(legacyFlat)) return legacyFlat;
+  if (normalized.startsWith("agents/")) {
+    return path.join(agentsDir(), path.basename(normalized));
   }
   return path.join(agentsDir(), path.basename(normalized));
 }
@@ -176,6 +206,7 @@ export function ensureScopePipelineDirs(project) {
   const root = workspaceRoot(project);
   [
     repoMacroScopesDir(),
+    path.join(root, "agents"),
     path.join(root, "scopes", "micro"),
     path.join(root, "backlog"),
     path.join(root, "reports", "scopes"),

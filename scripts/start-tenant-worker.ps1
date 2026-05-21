@@ -1,7 +1,15 @@
 param(
   [Parameter(Mandatory = $true)]
-  [string]$TenantId
+  [string]$TenantId,
+  [switch]$Build
 )
+
+if ($Build) {
+  $RootBuild = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+  Write-Host "A construir imagem ai-factory-cli:latest..."
+  docker build -t ai-factory-cli:latest $RootBuild
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
 
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $EnvFile = Join-Path $Root "data\tenants\$TenantId\.env"

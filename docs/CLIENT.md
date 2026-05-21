@@ -8,8 +8,8 @@ Este repositório é o **cliente** que corre na infraestrutura do tenant (ou do 
 |------------|--------|
 | `src/worker.js` | Poll da fila no backend, executa jobs, reporta dashboard |
 | `orchestrator/*` | Pipelines scope / develop / task |
-| `agent` (Cursor CLI) | Invoca prompts dos ficheiros em `data/tenants/<id>/agents/` |
-| Volume montado | `data/tenants/<tenantId>/` — workspaces, scopes, agentes |
+| `agent` (Cursor CLI) | Invoca prompts em `workspaces/<slug>/agents/` e `workspaces/<slug>/AGENTS.md` |
+| Volume montado | `data/tenants/<tenantId>/` — workspaces, scopes/macro |
 
 ## Dependências externas
 
@@ -18,9 +18,27 @@ Este repositório é o **cliente** que corre na infraestrutura do tenant (ou do 
 | **Backend** (API) | `BACK_URL` | URL publicada (ex. `http://host.docker.internal:4000` em dev Docker) |
 | **Redis** (logs) | `REDIS_URL` | **Docker (worker):** `redis://host.docker.internal:6379` se Redis no PC; **N8N:** `redis://redis-stack:6379`. Não uses `127.0.0.1` dentro do container. |
 | **Cursor** | `CURSOR_API_KEY` | Chave do tenant (gravada no back, exportada por `pull-tenant-env`) |
+| **Cursor Admin API** | `CURSOR_ADMIN_API_KEY` | Chave **Admin** (Enterprise) para `POST /teams/filtered-usage-events` — billing real por job |
+| **Billing** | `CURSOR_USAGE_EMAIL` | Filtra eventos por email na Admin API (opcional mas recomendado) |
 | **Cursor CLI** | `CURSOR_AGENT` (opcional) | Default na imagem: `agent` |
 
 Sem `REDIS_URL` o worker não arranca. Sem `CURSOR_API_KEY` os jobs que usam agentes falham.
+
+**Billing (por chamada e por rodada):** cada invocação do Cursor CLI regista timestamp local; ao fim de cada rodada (escopo fase 1 / fases 2–3 / onda micro 4–6, ou pipeline de uma task) o orquestrador consulta a Admin API e faz **match** dos eventos por timestamp mais próximo (com cluster para vários eventos na mesma chamada). O CB do job é a **soma das rodadas** em `data/tenants/<id>/billing-sessions/<jobId>.jsonl`. Sem sessão de rodadas, o worker usa fallback na janela do job (`[início−2min, fim+1min]`).
+
+| Variável | Default | Uso |
+|----------|---------|-----|
+| `BILLING_CB_ESTIMATE_PER_CALL` | `0.05` | Custo por chamada sem evento Cursor na rodada |
+| `BILLING_MAX_MATCH_DELTA_MS` | `120000` | Máx. distância temporal para match |
+| `BILLING_CALL_CLUSTER_MS` | `30000` | Agrupa eventos Cursor próximos numa chamada |
+| `BILLING_CB_ESTIMATE_USD` | `0.5` | Fallback por job (sem Admin API / sem rodadas) |
+
+Gravar Admin key na BD: `npm run set-cursor-admin-key -- <tenant-id>` no repo back.
+
+```bash
+# Diagnóstico (últimos 7 dias)
+TENANT_ID=<uuid> node scripts/fetch-cursor-usage.js --days=7
+```
 
 ### Reset de projeto (painel)
 
@@ -28,7 +46,17 @@ Sem `REDIS_URL` o worker não arranca. Sem `CURSOR_API_KEY` os jobs que usam age
 
 `data/tenants/<tenant-id>/BACKUP/YYYY-MM-DD/<slug>_HH-MM-SS.zip`
 
-Conteúdo: `workspace/<slug>/` (código, micros, backlog, relatórios, etc.), `scopes/macro/<slug>.md`, `manifest.json`. Depois remove o workspace e restaura o macro a partir do escopo na BD.
+Conteúdo: `workspace/<slug>/` (código, micros, backlog, relatórios, agentes, etc.), `scopes/macro/<slug>.md`, `manifest.json`. Depois remove o workspace, restaura macro e repõe agentes default do projeto na BD e no disco.
+
+### Agentes por projeto
+
+- Config na API: `project_agent_overrides` (por `tenant_id` + `project_slug`).
+- Templates globais: `agent_templates` (admin — Templates plataforma).
+- Overrides: admin — **Overrides por projeto** (tenant + slug).
+- Worker: antes de cada job, `GET /worker/projects/:slug/agents` → grava em `workspaces/<slug>/`.
+- Pasta legada `data/tenants/<id>/agents/` não é usada pelo runtime (fallback temporário se ficheiro do projeto não existir).
+
+Migrations: `006_project_agent_overrides.sql`, `007_drop_tenant_agent_overrides.sql`.
 
 ## Instalação
 

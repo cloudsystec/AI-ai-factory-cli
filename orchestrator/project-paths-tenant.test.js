@@ -40,4 +40,19 @@ describe("project-paths tenant env", () => {
     assert.ok(prefix.includes("workspaces"));
     assert.ok(prefix.includes("proj"));
   });
+
+  it("prioriza agents no workspace quando AI_FACTORY_ACTIVE_PROJECT está definido", async () => {
+    const { agentFilePath, globalAgentsFile } = await import("./project-paths.js");
+
+    const proj = "myapp";
+    const ws = path.join(tmp, "workspaces", proj);
+    fs.mkdirSync(path.join(ws, "agents"), { recursive: true });
+    fs.writeFileSync(path.join(ws, "AGENTS.md"), "project rules", "utf-8");
+    fs.writeFileSync(path.join(ws, "agents", "dev.md"), "project dev", "utf-8");
+
+    process.env.AI_FACTORY_ACTIVE_PROJECT = proj;
+
+    assert.equal(globalAgentsFile(), path.join(ws, "AGENTS.md"));
+    assert.equal(agentFilePath("agents/dev.md"), path.join(ws, "agents", "dev.md"));
+  });
 });

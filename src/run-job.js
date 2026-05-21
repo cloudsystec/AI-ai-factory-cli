@@ -44,12 +44,29 @@ export async function runJobLocally(job, onLine) {
   const macroId = job.macroId || project;
   const built = buildJobCommand(job.kind, project, macroId, job.taskId);
 
+  const tenantRoot = process.env.AI_FACTORY_TENANT_ROOT;
+  const billingSessionDir = tenantRoot
+    ? path.join(tenantRoot, "billing-sessions")
+    : undefined;
+
   const env = {
     ...process.env,
     AI_FACTORY_WORKSPACES_DIR: process.env.AI_FACTORY_WORKSPACES_DIR,
     AI_FACTORY_MACRO_DIR: process.env.AI_FACTORY_MACRO_DIR,
     CURSOR_API_KEY: process.env.CURSOR_API_KEY,
+    AI_FACTORY_JOB_ID: job.id,
+    ...(billingSessionDir
+      ? { AI_FACTORY_BILLING_SESSION_DIR: billingSessionDir }
+      : {}),
   };
+  if (project && process.env.AI_FACTORY_WORKSPACES_DIR) {
+    env.AI_FACTORY_ACTIVE_PROJECT = project;
+    env.AI_FACTORY_AGENTS_DIR = path.join(
+      process.env.AI_FACTORY_WORKSPACES_DIR,
+      project,
+      "agents"
+    );
+  }
 
   return new Promise((resolve, reject) => {
     onLine(`$ ${built.command}\n`);

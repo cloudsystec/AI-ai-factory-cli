@@ -145,6 +145,11 @@ async function main() {
       stdio: "inherit",
       cwd: process.cwd(),
       shell: true,
+      env: {
+        ...process.env,
+        AI_FACTORY_JOB_ID: process.env.AI_FACTORY_JOB_ID,
+        AI_FACTORY_BILLING_SESSION_DIR: process.env.AI_FACTORY_BILLING_SESSION_DIR,
+      },
     });
 
     updateTaskStatus(task.id, "done");

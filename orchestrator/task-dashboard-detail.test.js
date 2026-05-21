@@ -2,9 +2,19 @@ import test from "node:test";
 import assert from "node:assert";
 import fs from "node:fs";
 import path from "node:path";
-import { buildTaskDetail, isValidTaskId } from "./task-dashboard-detail.js";
+import {
+  buildTaskDetail,
+  isValidTaskId,
+  normalizeBacklogTextField,
+} from "./task-dashboard-detail.js";
 import { workspaceRoot } from "./project-paths.js";
 import { writeBacklogFile } from "./backlog-io.js";
+
+test("normalizeBacklogTextField: array vira markdown", () => {
+  const out = normalizeBacklogTextField(["Critério A", "Critério B"]);
+  assert.ok(out?.includes("- Critério A"));
+  assert.ok(out?.includes("- Critério B"));
+});
 
 test("isValidTaskId", () => {
   assert.strictEqual(isValidTaskId("bs-001-01"), true);
@@ -31,6 +41,7 @@ test("buildTaskDetail: backlog + doc artifact", () => {
         sourceMicroId: "bs-mic-001",
         title: "Task de teste",
         description: "Descrição curta",
+        acceptance: ["Aceite 1", "Aceite 2"],
         status: "todo",
         approved: true,
       },
@@ -45,6 +56,7 @@ test("buildTaskDetail: backlog + doc artifact", () => {
     assert.ok(detail);
     assert.strictEqual(detail.taskId, taskId);
     assert.strictEqual(detail.backlog?.title, "Task de teste");
+    assert.ok(detail.backlog?.acceptance?.includes("- Aceite 1"));
     assert.strictEqual(detail.runtime, null);
     const docArtifact = detail.artifacts.find((a) => a.kind === "doc");
     assert.ok(docArtifact?.exists);

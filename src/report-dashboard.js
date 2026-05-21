@@ -9,7 +9,7 @@ import {
 /**
  * Sincroniza snapshot do dashboard e develop-settings para o BACK (Postgres).
  * @param {string} projectSlug
- * @param {{ taskId?: string }} [opts]
+ * @param {{ taskId?: string, jobId?: string, publishDashboardEvent?: (jobId: string) => Promise<void> }} [opts]
  */
 export async function reportProjectDashboard(projectSlug, opts = {}) {
   const { isValidProjectSlug, taskStateFile } = await orchestratorImport(
@@ -44,13 +44,25 @@ export async function reportProjectDashboard(projectSlug, opts = {}) {
   const develop = readDevelopSettings(projectSlug);
   await putDevelopSettings(projectSlug, develop);
 
+  const { buildTaskDetail } = await orchestratorImport(
+    "task-dashboard-detail.js"
+  );
+
+  const detailIds = new Set(
+    tasks.map((t) => (t && typeof t.id === "string" ? t.id : null)).filter(Boolean)
+  );
   if (opts.taskId) {
-    const { buildTaskDetail } = await orchestratorImport(
-      "task-dashboard-detail.js"
-    );
-    const detail = buildTaskDetail(projectSlug, String(opts.taskId).trim());
+    detailIds.add(String(opts.taskId).trim());
+  }
+
+  for (const id of detailIds) {
+    const detail = buildTaskDetail(projectSlug, id);
     if (detail) {
-      await putTaskDetail(projectSlug, opts.taskId, detail);
+      await putTaskDetail(projectSlug, id, detail);
     }
+  }
+
+  if (opts.jobId && opts.publishDashboardEvent) {
+    await opts.publishDashboardEvent(opts.jobId);
   }
 }

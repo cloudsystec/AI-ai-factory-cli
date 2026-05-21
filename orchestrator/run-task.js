@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -12,7 +12,12 @@ import {
 import { readBacklogFile } from "./backlog-io.js";
 import { clearQaVerdict, readQaVerdict, qaVerdictFile } from "./qa-verdict.js";
 import { readAgentFile, readGlobalRules } from "./agent-prompts.js";
-import { cursorAgentArgv, cursorCommand } from "./cursor-agent-cli.js";
+import { runCursorAgent } from "./cursor-agent-runner.js";
+import {
+    beginBillingRound,
+    endBillingRound,
+    installBillingSignalHandlers,
+} from "../src/ai-call-billing.js";
 
 const project = process.argv[2];
 const taskId = process.argv[3];
@@ -79,6 +84,11 @@ function updateTaskState(status, currentAgent) {
     saveState(state);
 }
 
+function shouldSkipAgents() {
+    const v = process.env.AI_FACTORY_SKIP_AGENTS;
+    return v === "1" || v === "true";
+}
+
 function runAgent(roleFile, status, agentName, instruction) {
     updateTaskState(status, agentName);
 
@@ -118,12 +128,11 @@ ${instruction}
 
     console.log(`\n=== Rodando ${agentName} ===\n`);
 
-    execFileSync(cursorCommand(), cursorAgentArgv(), {
-        input: prompt,
-        stdio: ["pipe", "inherit", "inherit"],
-        cwd: process.cwd(),
-        shell: true,
-        env: process.env,
+    runCursorAgent({
+        agentFile: roleFile,
+        agentName,
+        prompt,
+        skipAgents: shouldSkipAgents(),
     });
 }
 
@@ -180,22 +189,34 @@ function cleanupTestEvidence(id) {
     }
 }
 
-try {
-    runAgent(
-        "agents/planner.md",
-        "planning",
-        "Planner Agent",
-        `Planeje a execução da tarefa.
+installBillingSignalHandlers();
+
+async function runTaskPipeline() {
+    beginBillingRound({
+        kind: "task",
+        label: `task ${taskId}`,
+        meta: { project, taskId },
+    });
+
+    let roundStatus = "completed";
+    let billingSettled = false;
+
+    try {
+        runAgent(
+            "agents/planner.md",
+            "planning",
+            "Planner Agent",
+            `Planeje a execução da tarefa.
         Grave o plano em ${projectRootPrompt}/reports/tasks/${task.id}-planner.md.
         Atualize ${projectRootPrompt}/docs/tasks/${task.id}.md com escopo, critérios de aceite e plano.
         Não altere código.`
-    );
+        );
 
-    runAgent(
-        "agents/dev.md",
-        "development",
-        "Dev Agent",
-        `Implemente a tarefa dentro de ${projectRootPrompt}/ (código da aplicação e artefatos do projeto).
+        runAgent(
+            "agents/dev.md",
+            "development",
+            "Dev Agent",
+            `Implemente a tarefa dentro de ${projectRootPrompt}/ (código da aplicação e artefatos do projeto).
         Crie ou atualize testes.
         Antes de finalizar: o projeto deve **compilar** (npm run build --prefix ${npmTestPrefix(project)}). Só encerre com exit code 0.
         Registe o resultado na secção **## Compilação** do relatório dev. Não deixe erros de compilação para o QA.
@@ -203,18 +224,18 @@ try {
         Grave o relatório em ${projectRootPrompt}/reports/tasks/${task.id}-dev.md.
         Se rodar testes, grave a saída em ${projectRootPrompt}/evidence/tests/${task.id}-test-output.txt.
         Atualize ${projectRootPrompt}/docs/tasks/${task.id}.md com arquivos alterados, decisões e pendências.`
-    );
+        );
 
-    for (let qaRound = 0; ; qaRound++) {
-        const testResult = runTests(task.id);
+        for (let qaRound = 0; ; qaRound++) {
+            const testResult = runTests(task.id);
 
-        clearQaVerdict(wsRoot, task.id);
+            clearQaVerdict(wsRoot, task.id);
 
-        runAgent(
-            "agents/qa.md",
-            "testing",
-            "QA Agent",
-            `Valide a implementação dentro de ${projectRootPrompt}/.
+            runAgent(
+                "agents/qa.md",
+                "testing",
+                "QA Agent",
+                `Valide a implementação dentro de ${projectRootPrompt}/.
 
         O orquestrador já executou os testes localmente.
 
@@ -237,31 +258,32 @@ try {
         - Use "fail" se existir bug, critério de aceite não cumprido, ou exitCode != 0 sem justificativa explícita no relatório QA.
         - Use "pass" só se estiver seguro para seguir para o Reviewer.
         Se gravar "fail", o orquestrador manda o Dev corrigir, volta a correr testes e chama o QA de novo — a task não segue com erro.`
-        );
-
-        const verdict = readQaVerdict(wsRoot, task.id);
-        if (verdict.verdict === "pass") {
-            console.log(`\n=== QA aprovou (veredito): ${verdict.summary || "ok"} ===\n`);
-            break;
-        }
-
-        if (qaRound >= MAX_QA_FAILURE_RETRIES) {
-            updateTaskState("blocked", "QA FAIL (max retries)");
-            console.error(
-                `\nQA reprovou após ${MAX_QA_FAILURE_RETRIES + 1} ronda(s) de QA. Último motivo: ${verdict.summary}\n`
             );
-            process.exit(1);
-        }
 
-        console.warn(
-            `\n=== QA reprovou (ronda ${qaRound + 1}/${MAX_QA_FAILURE_RETRIES + 1}): ${verdict.summary}\n=== Dev: corrigir; em seguida novos testes + QA ===\n`
-        );
+            const verdict = readQaVerdict(wsRoot, task.id);
+            if (verdict.verdict === "pass") {
+                console.log(`\n=== QA aprovou (veredito): ${verdict.summary || "ok"} ===\n`);
+                break;
+            }
 
-        runAgent(
-            "agents/dev.md",
-            "development",
-            "Dev Agent",
-            `Correção obrigatória pós-QA (ciclo ${qaRound + 2}): o QA reprovou com veredito "fail".
+            if (qaRound >= MAX_QA_FAILURE_RETRIES) {
+                updateTaskState("blocked", "QA FAIL (max retries)");
+                console.error(
+                    `\nQA reprovou após ${MAX_QA_FAILURE_RETRIES + 1} ronda(s) de QA. Último motivo: ${verdict.summary}\n`
+                );
+                roundStatus = "failed";
+                throw new Error("QA max retries");
+            }
+
+            console.warn(
+                `\n=== QA reprovou (ronda ${qaRound + 1}/${MAX_QA_FAILURE_RETRIES + 1}): ${verdict.summary}\n=== Dev: corrigir; em seguida novos testes + QA ===\n`
+            );
+
+            runAgent(
+                "agents/dev.md",
+                "development",
+                "Dev Agent",
+                `Correção obrigatória pós-QA (ciclo ${qaRound + 2}): o QA reprovou com veredito "fail".
         Leia integralmente:
         - ${projectRootPrompt}/reports/tasks/${task.id}-qa.md
         - ${qaVerdictRel}
@@ -271,26 +293,40 @@ try {
         Atualize código e testes; rode npm test se possível (npm test --prefix ${npmTestPrefix(project)}).
         Acrescente ao relatório ${projectRootPrompt}/reports/tasks/${task.id}-dev.md uma secção clara desta correção.
         Atualize ${projectRootPrompt}/docs/tasks/${task.id}.md.`
-        );
-    }
+            );
+        }
 
-    runAgent(
-        "agents/reviewer.md",
-        "review",
-        "Reviewer Agent",
-        `Revise a entrega.
+        runAgent(
+            "agents/reviewer.md",
+            "review",
+            "Reviewer Agent",
+            `Revise a entrega.
         Leia ${projectRootPrompt}/docs/tasks/${task.id}.md.
         Confirme que existe ${qaVerdictRel} com "verdict":"pass" (o orquestrador só chama o Reviewer após QA passar).
         Leia ${projectRootPrompt}/evidence/tests/${task.id}-test-output.txt (se ainda existir após o QA).
         Grave o parecer em ${projectRootPrompt}/reports/tasks/${task.id}-reviewer.md.
         Aprove apenas se critérios e evidências estiverem suficientes.`
-    );
+        );
 
-    cleanupTestEvidence(task.id);
+        cleanupTestEvidence(task.id);
 
-    updateTaskState("done", "Human Approval Pending");
-} catch (error) {
-    updateTaskState("blocked", "Error");
-    console.error(error.message);
-    process.exit(1);
+        updateTaskState("done", "Human Approval Pending");
+    } catch (error) {
+        if (roundStatus !== "failed") {
+            updateTaskState("blocked", "Error");
+        }
+        console.error(error.message);
+        roundStatus = "failed";
+        throw error;
+    } finally {
+        if (!billingSettled) {
+            await endBillingRound({ status: roundStatus });
+            billingSettled = true;
+        }
+    }
 }
+
+runTaskPipeline().catch((err) => {
+    console.error(err);
+    process.exit(1);
+});

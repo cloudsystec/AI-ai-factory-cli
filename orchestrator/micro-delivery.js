@@ -3,6 +3,22 @@ import path from "node:path";
 import { readBacklogFile } from "./backlog-io.js";
 
 /**
+ * Extrai lista de microescopos de vários formatos JSON (array raiz ou envelope).
+ * @param {unknown} raw
+ * @returns {object[]}
+ */
+export function parseMicrosJson(raw) {
+  if (Array.isArray(raw)) return raw;
+  if (!raw || typeof raw !== "object") return [];
+  const obj = /** @type {Record<string, unknown>} */ (raw);
+  for (const key of ["microscopes", "microScopes", "items"]) {
+    const v = obj[key];
+    if (Array.isArray(v)) return v;
+  }
+  return [];
+}
+
+/**
  * @param {string} microPath
  * @returns {object[]}
  */
@@ -11,10 +27,7 @@ export function readMicrosFromPath(microPath) {
   const raw = JSON.parse(
     fs.readFileSync(microPath, "utf-8").replace(/^\uFEFF/, "")
   );
-  if (Array.isArray(raw)) return raw;
-  if (raw && Array.isArray(raw.microScopes)) return raw.microScopes;
-  if (raw && Array.isArray(raw.items)) return raw.items;
-  return [];
+  return parseMicrosJson(raw);
 }
 
 /**

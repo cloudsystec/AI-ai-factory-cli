@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
-# Uso: ./scripts/start-tenant-worker.sh <tenant-id>
+# Uso: ./scripts/start-tenant-worker.sh <tenant-id> [--build]
 set -euo pipefail
 TENANT_ID="${1:-}"
+BUILD=false
+if [[ "${2:-}" == "--build" ]]; then
+  BUILD=true
+fi
 if [[ -z "$TENANT_ID" ]]; then
-  echo "Uso: $0 <tenant-id>" >&2
+  echo "Uso: $0 <tenant-id> [--build]" >&2
   exit 1
 fi
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if [[ "$BUILD" == true ]]; then
+  echo "A construir imagem ai-factory-cli:latest..."
+  docker build -t ai-factory-cli:latest "$ROOT"
+fi
 ENV_FILE="$ROOT/data/tenants/$TENANT_ID/.env"
 IMAGE="${AIFACTORY_CLI_IMAGE:-ai-factory-cli:latest}"
 if [[ ! -f "$ENV_FILE" ]]; then

@@ -14,6 +14,23 @@ const PREVIEW_MAX_CHARS = 2000;
 const EVIDENCE_TAIL_LINES = 80;
 
 /**
+ * Normaliza campos de backlog para string (Markdown / API).
+ * @param {unknown} value
+ * @returns {string|null}
+ */
+export function normalizeBacklogTextField(value) {
+  if (value == null) return null;
+  if (typeof value === "string") return value.trim() || null;
+  if (Array.isArray(value)) {
+    const lines = value
+      .map((item) => (typeof item === "string" ? item.trim() : String(item)))
+      .filter(Boolean);
+    return lines.length > 0 ? lines.map((line) => `- ${line}`).join("\n") : null;
+  }
+  return String(value);
+}
+
+/**
  * @param {string} taskId
  */
 export function isValidTaskId(taskId) {
@@ -155,9 +172,9 @@ export function buildTaskDetail(project, taskId) {
       backlog = {
         sourceMicroId: task.sourceMicroId ?? null,
         title: task.title ?? null,
-        description: task.description ?? null,
-        acceptance: task.acceptance ?? null,
-        testStrategy: task.testStrategy ?? null,
+        description: normalizeBacklogTextField(task.description),
+        acceptance: normalizeBacklogTextField(task.acceptance),
+        testStrategy: normalizeBacklogTextField(task.testStrategy),
         dependencies: Array.isArray(task.dependencies) ? task.dependencies : [],
         status: task.status ?? null,
         approved: task.approved ?? null,

@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
 import {
   macroScopeFile,
   ensureScopePipelineDirs,
@@ -9,7 +8,12 @@ import {
   microScopeFile,
 } from "./project-paths.js";
 import { readAgentFile, readGlobalRules } from "./agent-prompts.js";
-import { cursorAgentArgv, cursorCommand } from "./cursor-agent-cli.js";
+import { runCursorAgent } from "./cursor-agent-runner.js";
+import {
+  beginBillingRound,
+  endBillingRound,
+  installBillingSignalHandlers,
+} from "../src/ai-call-billing.js";
 import { readBacklogFile, writeBacklogFile } from "./backlog-io.js";
 import {
   readMicrosFromPath,
@@ -101,7 +105,7 @@ function shouldSkipAgents() {
   return v === "1" || v === "true";
 }
 
-function runAgent(agentFile, prompt) {
+function runAgent(agentFile, prompt, agentName) {
   const fullPrompt = `
 Leia AGENTS.md e ${agentFile}.
 
@@ -114,27 +118,16 @@ ${readAgentFile(agentFile)}
 ${prompt}
 `;
 
-  if (shouldSkipAgents()) {
-    console.log(`\n[AI_FACTORY_SKIP_AGENTS] Agente ignorado: ${agentFile}\n`);
-    if (process.env.AI_FACTORY_DEBUG_PROMPT === "1") {
-      const logDir = path.join(process.cwd(), "logs", "scope-debug");
-      fs.mkdirSync(logDir, { recursive: true });
-      const safeName = agentFile.replace(/[/\\]/g, "-").replace(/\.md$/, "");
-      const out = path.join(logDir, `${Date.now()}-${safeName}.prompt.txt`);
-      fs.writeFileSync(out, fullPrompt, "utf-8");
-      console.log(`  Prompt gravado em: ${out}\n`);
-    }
-    return;
-  }
-
-  execFileSync(cursorCommand(), cursorAgentArgv(), {
-    input: fullPrompt,
-    stdio: ["pipe", "inherit", "inherit"],
-    cwd: process.cwd(),
-    shell: true,
-    env: process.env,
+  runCursorAgent({
+    agentFile,
+    agentName,
+    prompt: fullPrompt,
+    skipAgents: shouldSkipAgents(),
+    debugPromptDir: path.join(process.cwd(), "logs", "scope-debug"),
   });
 }
+
+installBillingSignalHandlers();
 
 function freezeApprovedMicros(currentMicros, updatedMicros) {
   const approvedMap = new Map();
@@ -261,6 +254,7 @@ if (tasksOnly) {
   console.log("\n=== Modo --tasks-only: executando FASEs 4–6 para o micro 'open' ===\n");
 }
 
+async function runScopePipeline() {
 ensureFolders();
 
 if (!fs.existsSync(macroFile)) {
@@ -272,6 +266,8 @@ if (!fs.existsSync(macroFile)) {
  * FASE 1 — Gerar microescopos apenas se ainda não existir arquivo.
  */
 if (!tasksOnly && !fs.existsSync(microFile)) {
+  beginBillingRound({ kind: "scope_phase1", label: "FASE 1 macro→micro" });
+  try {
   console.log("\n=== FASE 1: Gerando microescopos ===\n");
 
   runAgent(
@@ -298,7 +294,7 @@ Regras:
 - Evite micros que só produzem papel sem caminho claro para código/testes.
 - Não gere tasks ainda.
 - Não implemente código.
-- O arquivo deve ser JSON válido.
+- O arquivo deve ser JSON válido com **array na raiz** (ex.: [{ "id": "...", ... }]), não um objeto envelope com chave microscopes.
 - Cada microescopo deve ter:
   - id
   - project
@@ -317,8 +313,12 @@ Valores iniciais obrigatórios:
 - approved: false
 - validationStatus: "pending_validation"
 - priority: null
-`
+`,
+    "Macro to Micro"
   );
+  } finally {
+    await endBillingRound({ status: "completed" });
+  }
 }
 
 if (tasksOnly && !fs.existsSync(microFile)) {
@@ -327,10 +327,23 @@ if (tasksOnly && !fs.existsSync(microFile)) {
 }
 
 if (!tasksOnly) {
+beginBillingRound({ kind: "scope_phase23", label: "FASE 2–3 PO e priorização" });
+try {
 /**
  * FASE 2 — Validar microescopos somente se houver algo não aprovado.
  */
 console.log("\n=== FASE 2: Validação PO dos microescopos ===\n");
+
+const microCountAfterPhase1 = readMicros().length;
+if (microCountAfterPhase1 === 0) {
+  console.error(
+    "\nNenhum microescopo legível em " +
+      microFile +
+      ". O JSON deve ser um array na raiz ou um objeto com campo microscopes/microScopes. " +
+      "Corrija o ficheiro ou apague-o e volte a executar Gerar escopo.\n"
+  );
+  process.exit(1);
+}
 
 if (getMicrosToValidate().length === 0) {
   console.log("Todos os microescopos já estão aprovados. Pulando validação PO.");
@@ -469,7 +482,6 @@ Regras:
     );
   }
 }
-}
 
 const approvedMicros = getApprovedMicros();
 
@@ -478,7 +490,6 @@ if (approvedMicros.length === 0) {
   process.exit(1);
 }
 
-if (!tasksOnly) {
 /**
  * FASE 3 — Priorizar microescopos aprovados.
  */
@@ -510,8 +521,12 @@ Regras:
 - Ordene por dependência, risco e valor.
 - Mantenha JSON válido.
 - Preserve o campo taskDeliveryStatus quando já existir (ondas de entrega); o orquestrador sincroniza open/locked/closed após esta fase.
-`
+`,
+  "Micro Prioritizer"
 );
+} finally {
+  await endBillingRound({ status: "completed" });
+}
 }
 
 console.log("\n=== Sincronizando ondas de entrega (taskDeliveryStatus) ===\n");
@@ -531,6 +546,12 @@ console.log(
   `\nMicro ativo para esta onda de tasks: ${targetMicro.id} — ${targetMicro.title}\n`
 );
 
+beginBillingRound({
+  kind: "micro_wave",
+  label: `FASE 4–6 ${targetMicro.id}`,
+  meta: { microId: targetMicro.id, project, macroId },
+});
+try {
 /**
  * FASE 4 — Gerar tasks entregáveis.
  */
@@ -806,3 +827,12 @@ console.log("\nPara iniciar desenvolvimento (informe o macro-id):");
 console.log(`npm run develop ${project} ${macroId}`);
 console.log("\nPróximo lote de tasks do próximo micro (após fechar a onda atual):");
 console.log(`npm run scope -- ${project} ${macroId} --tasks-only`);
+} finally {
+  await endBillingRound({ status: "completed" });
+}
+}
+
+runScopePipeline().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
