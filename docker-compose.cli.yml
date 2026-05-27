@@ -9,6 +9,17 @@ services:
     environment:
       REDIS_URL: ${REDIS_URL:-redis://redis-stack:6379}
       BACK_URL: ${BACK_URL:-http://host.docker.internal:4000}
+      AI_FACTORY_LOG_COLOR: "1"
+      AI_FACTORY_LOG_LEVEL: ${AI_FACTORY_LOG_LEVEL:-debug}
+      GIT_AUTHOR_NAME: "Factory Agent"
+      GIT_AUTHOR_EMAIL: "agent@factory.local"
+      GIT_COMMITTER_NAME: "Factory Agent"
+      GIT_COMMITTER_EMAIL: "agent@factory.local"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
     volumes:
       - ./data/tenants/a1111111-1111-4111-8111-111111111111:/app/data/tenants/a1111111-1111-4111-8111-111111111111
     extra_hosts:

@@ -21,8 +21,18 @@ Este repositório é o **cliente** que corre na infraestrutura do tenant (ou do 
 | **Cursor (execução)** | *(por job)* | `CURSOR_API_KEY` do **executor** que iniciou o job — enviada no `POST /worker/claim`, não no `.env` |
 | **Billing** | `CURSOR_USAGE_EMAIL` | Definido automaticamente com o email do executor do job (override opcional no `.env`) |
 | **Cursor CLI** | `CURSOR_AGENT` (opcional) | Default na imagem: `agent` |
+| **Logs** | `AI_FACTORY_LOG_COLOR`, `AI_FACTORY_LOG_LEVEL` | Cores em `docker logs` (default `COLOR=1` na imagem) |
 
-Sem `REDIS_URL` o worker não arranca. Jobs de pipeline exigem API key Cursor configurada no executor (admin plataforma).
+Sem `REDIS_URL` o worker não arranca.
+
+### Logs no Docker
+
+```bash
+docker compose -f docker-compose.cli.yml --profile daniel up -d --build
+docker logs -f cli-tenant-daniel
+```
+
+Variáveis: `AI_FACTORY_LOG_COLOR=1` (cores), `AI_FACTORY_LOG_LEVEL=info|debug|warn|error`. O portal continua a receber logs **sem** códigos ANSI (Redis). Jobs de pipeline exigem API key Cursor configurada no executor (admin plataforma).
 
 **Billing (por chamada e por rodada):** cada invocação do Cursor CLI regista timestamp local; ao fim de cada rodada (escopo fase 1 / fases 2–3 / onda micro 4–6, ou pipeline de uma task) o orquestrador consulta a Admin API e faz **match** dos eventos por timestamp mais próximo (com cluster para vários eventos na mesma chamada). O CB do job é a **soma das rodadas** em `data/tenants/<id>/billing-sessions/<jobId>.jsonl`. Sem sessão de rodadas, o worker usa fallback na janela do job (`[início−2min, fim+1min]`).
 

@@ -7,13 +7,15 @@ import {
   backlogFile as backlogFilePath,
   microScopeFile,
 } from "./project-paths.js";
-import { readAgentFile, readGlobalRules } from "./agent-prompts.js";
+import { readAgentFile, readGlobalRules, systemSecurityRules } from "./agent-prompts.js";
 import { runCursorAgent } from "./cursor-agent-runner.js";
 import {
-  beginBillingRound,
-  endBillingRound,
+  flushPendingSettlements,
   installBillingSignalHandlers,
 } from "../src/ai-call-billing.js";
+import { createLogger } from "../src/logger.js";
+
+const log = createLogger("scope");
 import { readBacklogFile, writeBacklogFile } from "./backlog-io.js";
 import {
   readMicrosFromPath,
@@ -105,7 +107,10 @@ function shouldSkipAgents() {
   return v === "1" || v === "true";
 }
 
-function runAgent(agentFile, prompt, agentName) {
+function runAgent(agentFile, prompt, agentName, meta = {}) {
+  const label = agentName || agentFile;
+  log.debug(`Preparando agente`, { agent: label, file: agentFile, promptLen: prompt.length });
+
   const fullPrompt = `
 Leia AGENTS.md e ${agentFile}.
 
@@ -116,15 +121,20 @@ Conteúdo de ${agentFile}:
 ${readAgentFile(agentFile)}
 
 ${prompt}
+
+${systemSecurityRules()}
 `;
 
+  const startMs = log.timerStart(`Agente ${label}`);
   runCursorAgent({
     agentFile,
     agentName,
     prompt: fullPrompt,
     skipAgents: shouldSkipAgents(),
     debugPromptDir: path.join(process.cwd(), "logs", "scope-debug"),
+    meta: { project, macroId, ...meta },
   });
+  log.timerEnd(`Agente ${label}`, startMs);
 }
 
 installBillingSignalHandlers();
@@ -251,10 +261,12 @@ function getTasksToValidateForMicro(microId) {
 }
 
 if (tasksOnly) {
-  console.log("\n=== Modo --tasks-only: executando FASEs 4–6 para o micro 'open' ===\n");
+  log.phase("Modo --tasks-only: FASEs 4–6 (micro open)");
 }
 
 async function runScopePipeline() {
+const pipelineStartMs = Date.now();
+log.debug("Pipeline de escopo iniciado", { project, macroId, tasksOnly });
 ensureFolders();
 
 if (!fs.existsSync(macroFile)) {
@@ -262,13 +274,19 @@ if (!fs.existsSync(macroFile)) {
   process.exit(1);
 }
 
+function isMacroSimple(macroContent) {
+  const lines = macroContent.trim().split("\n").filter(l => l.trim().length > 0);
+  return lines.length <= 5 || macroContent.trim().length < 200;
+}
+
+const macroContent = read(macroFile);
+const macroSimple = isMacroSimple(macroContent);
+
 /**
  * FASE 1 — Gerar microescopos apenas se ainda não existir arquivo.
  */
 if (!tasksOnly && !fs.existsSync(microFile)) {
-  beginBillingRound({ kind: "scope_phase1", label: "FASE 1 macro→micro" });
-  try {
-  console.log("\n=== FASE 1: Gerando microescopos ===\n");
+  log.phase("FASE 1: Gerando microescopos");
 
   runAgent(
     "agents/macro-to-micro.md",
@@ -289,8 +307,12 @@ Crie o relatório:
 ${path.join(reportsScopesDir, `${macroId}-macro-to-micro.md`)}
 
 Regras:
-- **3 a 7 microescopos** (trilhas de entrega), no máximo 8; não atomize em dezenas de passos técnicos estreitos.
-- Cada micro = direção para **produção**, **correção** ou **melhoria verificável** do sistema; descrições concisas (a IA de implementação detalha o técnico).
+- Avalie a complexidade do macro:
+  - Se o macro descreve uma única feature ou sistema simples (ex.: "API com health e swagger"), gere **1 micro** (no máximo 2) com descrição ampla que comporte várias tasks.
+  - Se o macro descreve múltiplas features independentes ou sistema complexo, gere **3 a 5 microescopos** (máximo 7).
+- Cada micro = "fluxo de entrega" (wave), NÃO uma camada técnica isolada.
+- Um micro deve comportar **2-5 tasks** de implementação; se gerar um micro que só teria 1 task, o micro é estreito demais — agrupe.
+- NÃO atomize em camadas (ex.: "só bootstrap HTTP", "só health", "só config") — junte num único micro "API mínima utilizável".
 - Evite micros que só produzem papel sem caminho claro para código/testes.
 - Não gere tasks ainda.
 - Não implemente código.
@@ -314,11 +336,9 @@ Valores iniciais obrigatórios:
 - validationStatus: "pending_validation"
 - priority: null
 `,
-    "Macro to Micro"
+    "Macro to Micro",
+    { step: "macro_to_micro" }
   );
-  } finally {
-    await endBillingRound({ status: "completed" });
-  }
 }
 
 if (tasksOnly && !fs.existsSync(microFile)) {
@@ -327,12 +347,10 @@ if (tasksOnly && !fs.existsSync(microFile)) {
 }
 
 if (!tasksOnly) {
-beginBillingRound({ kind: "scope_phase23", label: "FASE 2–3 PO e priorização" });
-try {
 /**
  * FASE 2 — Validar microescopos somente se houver algo não aprovado.
  */
-console.log("\n=== FASE 2: Validação PO dos microescopos ===\n");
+log.phase("FASE 2: Validação PO dos microescopos");
 
 const microCountAfterPhase1 = readMicros().length;
 if (microCountAfterPhase1 === 0) {
@@ -347,6 +365,17 @@ if (microCountAfterPhase1 === 0) {
 
 if (getMicrosToValidate().length === 0) {
   console.log("Todos os microescopos já estão aprovados. Pulando validação PO.");
+} else if (macroSimple) {
+  log.info("Macro simples — auto-aprovando micros (skip PO)");
+  const all = readMicros().map((m, i) => ({
+    ...m,
+    approved: true,
+    status: "validated",
+    validationStatus: "approved",
+    poScore: 95,
+    priority: i + 1,
+  }));
+  writeMicros(all);
 } else {
   for (let round = 1; round <= MAX_VALIDATION_ROUNDS; round++) {
     console.log(`\n--- Rodada PO ${round}/${MAX_VALIDATION_ROUNDS} ---\n`);
@@ -408,7 +437,9 @@ Regras:
   - status: "needs_refinement"
   - validationStatus: "rejected"
   - poScore: número abaixo de 90
-`
+`,
+      undefined,
+      { step: "po_validation", round }
     );
 
     normalizeMicroApproval();
@@ -478,7 +509,9 @@ Regras:
   - status: "pending_validation"
   - approved: false
   - validationStatus: "pending_validation"
-`
+`,
+      undefined,
+      { step: "micro_refiner", round }
     );
   }
 }
@@ -493,7 +526,7 @@ if (approvedMicros.length === 0) {
 /**
  * FASE 3 — Priorizar microescopos aprovados.
  */
-console.log("\n=== FASE 3: Priorizando microescopos aprovados ===\n");
+log.phase("FASE 3: Priorizando microescopos aprovados");
 
 runAgent(
   "agents/micro-prioritizer.md",
@@ -522,14 +555,12 @@ Regras:
 - Mantenha JSON válido.
 - Preserve o campo taskDeliveryStatus quando já existir (ondas de entrega); o orquestrador sincroniza open/locked/closed após esta fase.
 `,
-  "Micro Prioritizer"
+  "Micro Prioritizer",
+  { step: "micro_prioritization" }
 );
-} finally {
-  await endBillingRound({ status: "completed" });
-}
 }
 
-console.log("\n=== Sincronizando ondas de entrega (taskDeliveryStatus) ===\n");
+log.phase("Sincronizando ondas de entrega");
 syncTaskDeliveryFlags({ microPath: microFile, backlogPath: backlogFile, project, macroId });
 const microsForTarget = readMicrosFromPath(microFile);
 const targetMicro = getOpenMicro(microsForTarget);
@@ -546,16 +577,10 @@ console.log(
   `\nMicro ativo para esta onda de tasks: ${targetMicro.id} — ${targetMicro.title}\n`
 );
 
-beginBillingRound({
-  kind: "micro_wave",
-  label: `FASE 4–6 ${targetMicro.id}`,
-  meta: { microId: targetMicro.id, project, macroId },
-});
-try {
 /**
  * FASE 4 — Gerar tasks entregáveis.
  */
-console.log("\n=== FASE 4: Gerando tasks entregáveis ===\n");
+log.phase("FASE 4: Gerando tasks entregáveis");
 
 const currentBacklog = readBacklog();
 
@@ -591,7 +616,9 @@ Formato obrigatório do backlog:
 }
 
 Regras:
-- **1–2 tasks por micro** (máximo 3); prefira menos tasks mais capazes a muitas micro-tarefas.
+- **2-5 tasks por micro** (mínimo 2, máximo 5); se o micro só teria 1 task, o micro deveria ter sido maior.
+- Cada task deve ser entregável de forma independente dentro do contexto do micro.
+- NÃO crie tasks "de documentação" ou "setup" isoladas — integre-as na task funcional.
 - Tasks devem gerar **mudança em código** (\`src/\` ou equivalente) ou **testes**; \`docs/\` só como suporte, não entrega única.
 - Critérios de aceite claros mas não hiper-prescritivos (sem listar cada ficheiro salvo quando crítico).
 - Gere tasks entregáveis **somente** para o microescopo ALVO (id: ${targetMicro.id}).
@@ -619,18 +646,36 @@ Valores iniciais para task nova:
 - status: "pending_validation"
 - approved: false
 - validationStatus: "pending_validation"
-`
+`,
+  undefined,
+  { step: "task_generation", microId: targetMicro.id }
 );
 
 /**
  * FASE 5 — Validar tasks somente se houver algo não aprovado.
  */
-console.log("\n=== FASE 5: Validação Tech Lead das tasks ===\n");
+log.phase("FASE 5: Validação Tech Lead das tasks");
 
 if (getTasksToValidateForMicro(targetMicro.id).length === 0) {
   console.log(
     "Todas as tasks elegíveis do micro atual já estão aprovadas. Pulando validação Tech Lead."
   );
+} else if (macroSimple) {
+  log.info("Macro simples — auto-aprovando tasks (skip TL)");
+  const current = readBacklog();
+  const updated = current.tasks.map((t, i) => {
+    if (t.sourceMicroId !== targetMicro.id) return t;
+    if (t.validationStatus === "approved") return t;
+    return {
+      ...t,
+      status: "todo",
+      approved: true,
+      validationStatus: "approved",
+      techLeadScore: 95,
+      priority: i + 1,
+    };
+  });
+  writeBacklog(updated);
 } else {
   for (let round = 1; round <= MAX_VALIDATION_ROUNDS; round++) {
     console.log(`\n--- Rodada Tech Lead ${round}/${MAX_VALIDATION_ROUNDS} ---\n`);
@@ -703,7 +748,9 @@ Regras:
   "macroId": "${macroId}",
   "tasks": []
 }
-`
+`,
+      undefined,
+      { step: "tl_validation", microId: targetMicro.id, round }
     );
 
     normalizeTaskApproval();
@@ -780,7 +827,9 @@ Regras:
   - status: "pending_validation"
   - approved: false
   - validationStatus: "pending_validation"
-`
+`,
+      undefined,
+      { step: "task_refiner", microId: targetMicro.id, round }
     );
   }
 }
@@ -788,7 +837,7 @@ Regras:
 /**
  * FASE 6 — Priorização final do backlog.
  */
-console.log("\n=== FASE 6: Priorizando backlog final ===\n");
+log.phase("FASE 6: Priorizando backlog final");
 
 runAgent(
   "agents/task-prioritizer.md",
@@ -817,19 +866,20 @@ Regras:
   "macroId": "${macroId}",
   "tasks": []
 }
-`
+`,
+  undefined,
+  { step: "task_prioritization", microId: targetMicro.id }
 );
 
-console.log("\nPipeline de escopo concluído.");
+const pipelineElapsedMs = Date.now() - pipelineStartMs;
+log.info("Pipeline de escopo concluído", { elapsedMs: pipelineElapsedMs, elapsedSec: `${(pipelineElapsedMs / 1000).toFixed(1)}s` });
 syncTaskDeliveryFlags({ microPath: microFile, backlogPath: backlogFile, project, macroId });
 console.log(`Backlog atualizado: ${backlogFile}`);
 console.log("\nPara iniciar desenvolvimento (informe o macro-id):");
 console.log(`npm run develop ${project} ${macroId}`);
 console.log("\nPróximo lote de tasks do próximo micro (após fechar a onda atual):");
 console.log(`npm run scope -- ${project} ${macroId} --tasks-only`);
-} finally {
-  await endBillingRound({ status: "completed" });
-}
+await flushPendingSettlements();
 }
 
 runScopePipeline().catch((err) => {

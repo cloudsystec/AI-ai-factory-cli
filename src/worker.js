@@ -29,6 +29,7 @@ const {
   completeJob,
   heartbeat,
   registerWorker,
+  updateJobBilling,
 } = await import("./back-client.js");
 const {
   appendJobLogLine,
@@ -43,9 +44,11 @@ const {
   readJobBillingTotal,
   clearBillingSession,
 } = await import("./ai-call-billing.js");
+const { createLogger, redactForClient } = await import("./logger.js");
 
+const log = createLogger("worker");
 const WORKER_ID = process.env.WORKER_ID || `cli-${TENANT_ID.slice(0, 8)}`;
-const POLL_MS = Number(process.env.CLAIM_POLL_MS || 3000);
+const POLL_MS = Number(process.env.CLAIM_POLL_MS || 1000);
 const DASHBOARD_SYNC_MS = Number(process.env.DASHBOARD_SYNC_MS || 5000);
 
 let running = false;
@@ -69,55 +72,77 @@ async function syncDashboardForJob(projectSlug, opts = {}) {
 async function syncAgentsForProject(projectSlug) {
   if (!projectSlug) return;
   const n = await syncProjectAgentsToDisk(tenantRoot, projectSlug);
-  console.log(`Agentes sincronizados para ${projectSlug}: ${n} ficheiros`);
+  log.info("Agentes sincronizados", { project: projectSlug, files: n });
 }
+
+const BILLING_SETTLE_DELAY_MS = Number(process.env.BILLING_SETTLE_DELAY_MS || 20_000);
 
 /**
  * @param {string} jobId
- * @param {{ status: string, exitCode?: number, startedMs: number, finishedMs: number }} opts
+ * @param {{ status: string, exitCode?: number, startedMs: number, finishedMs: number, billingEmail?: string }} opts
  */
 async function finishJobWithBilling(jobId, opts) {
   const sessionTotals = readJobBillingTotal(jobId);
-  let billing;
 
-  if (sessionTotals.roundCount > 0) {
-    billing = {
-      costBaseUsd: Math.max(0.01, sessionTotals.totalCostBaseUsd),
-      source: "round_settlement",
-      detail: {
-        roundCount: sessionTotals.roundCount,
-      },
-    };
-  } else {
-    billing = await resolveJobCostBaseUsd({
-      startedMs: opts.startedMs,
-      finishedMs: opts.finishedMs,
-      email: opts.billingEmail,
+  if (sessionTotals.callCount > 0) {
+    await completeJob(jobId, {
+      status: opts.status,
+      exitCode: opts.exitCode,
+      costBaseUsd: sessionTotals.totalCostBaseUsd,
     });
+    log.debug("Billing registado (round_settlement)", {
+      jobId,
+      costBaseUsd: sessionTotals.totalCostBaseUsd.toFixed(4),
+    });
+    return;
   }
 
   await completeJob(jobId, {
     status: opts.status,
     exitCode: opts.exitCode,
-    costBaseUsd: billing.costBaseUsd,
+    costBaseUsd: 0,
   });
 
-  const d = billing.detail ?? {};
-  let extra;
-  if (billing.source === "round_settlement") {
-    extra = ` | rodadas=${d.roundCount ?? 0}`;
-  } else if (billing.source === "cursor_admin_api") {
-    extra = ` | eventos=${d.eventCount ?? 0} tokens_in=${d.tokensIn ?? 0} tokens_out=${d.tokensOut ?? 0}`;
-  } else {
-    extra = ` | ${d.reason ?? "estimate"}`;
-  }
+  settleBillingInBackground(jobId, opts);
+}
 
-  await appendJobLogLine(
-    jobId,
-    `[billing] CB=$${billing.costBaseUsd.toFixed(4)} (${billing.source})${extra}`
-  ).catch(() => {});
-
-  return billing;
+/**
+ * Aguarda o delay e depois resolve o custo real via Cursor Admin API,
+ * atualizando apenas o billing do job sem bloquear o worker.
+ */
+function settleBillingInBackground(jobId, opts) {
+  log.debug("Billing background agendado", { jobId, delayMs: BILLING_SETTLE_DELAY_MS });
+  setTimeout(async () => {
+    log.debug("Billing background: iniciando resolução", { jobId });
+    const resolveStart = Date.now();
+    try {
+      const billing = await resolveJobCostBaseUsd({
+        startedMs: opts.startedMs,
+        finishedMs: opts.finishedMs,
+        email: opts.billingEmail,
+      });
+      const resolveMs = Date.now() - resolveStart;
+      if (billing.costBaseUsd > 0) {
+        await updateJobBilling(jobId, {
+          costBaseUsd: billing.costBaseUsd,
+        });
+        log.info("Billing atualizado (background)", {
+          jobId,
+          costBaseUsd: billing.costBaseUsd.toFixed(4),
+          source: billing.source,
+          resolveMs,
+        });
+      } else {
+        log.debug("Billing background: custo zero, sem atualização", { jobId, source: billing.source, resolveMs });
+      }
+    } catch (e) {
+      log.warn("Billing background falhou", {
+        jobId,
+        error: e instanceof Error ? e.message : String(e),
+        resolveMs: Date.now() - resolveStart,
+      });
+    }
+  }, BILLING_SETTLE_DELAY_MS);
 }
 
 async function processOneJob(job) {
@@ -126,6 +151,14 @@ async function processOneJob(job) {
   const projectSlug =
     job.projectSlug ||
     (job.kind === "provision" ? job.payload?.slug : null);
+
+  log.debug("Job processamento iniciado", {
+    jobId: job.id,
+    kind: job.kind,
+    project: projectSlug || "—",
+    task: job.taskId || "—",
+    executor: job.requestedByEmail || "—",
+  });
 
   const prevUsageEmail = process.env.CURSOR_USAGE_EMAIL;
   if (job.requestedByEmail) {
@@ -137,7 +170,9 @@ async function processOneJob(job) {
 
   try {
     if (projectSlug) {
+      const syncStart = Date.now();
       await syncAgentsForProject(projectSlug);
+      log.debug("Agentes sincronizados", { project: projectSlug, elapsedMs: Date.now() - syncStart });
     }
 
     await resetJobLog(job.id);
@@ -159,22 +194,31 @@ async function processOneJob(job) {
       await syncDashboardForJob(projectSlug, {
         taskId: job.taskId || undefined,
         jobId: job.id,
-      }).catch((e) => console.warn("dashboard sync (start):", e.message));
+      }).catch((e) => log.warn("Dashboard sync (início)", { error: e.message }));
 
       dashboardTimer = setInterval(() => {
         syncDashboardForJob(projectSlug, {
           taskId: job.taskId || undefined,
           jobId: job.id,
-        }).catch((e) => console.warn("dashboard sync (interval):", e.message));
+        }).catch((e) => log.warn("Dashboard sync", { error: e.message }));
       }, DASHBOARD_SYNC_MS);
     }
+
+    log.debug("Executando job localmente", { jobId: job.id, kind: job.kind });
+    const jobExecStart = Date.now();
 
     let result;
     try {
       result = await runJobLocally(job, (line) => {
-        appendJobLogLine(job.id, line).catch((e) =>
-          console.error("log failed", e.message)
-        );
+        const plain = log.jobLine(line);
+        if (plain) {
+          const safe = redactForClient(plain);
+          if (safe) {
+            appendJobLogLine(job.id, safe).catch((e) =>
+              log.error("Falha ao gravar log no Redis", { error: e.message })
+            );
+          }
+        }
       });
     } finally {
       if (dashboardTimer) {
@@ -192,11 +236,21 @@ async function processOneJob(job) {
     }
 
     const finishedMs = Date.now();
+    const jobExecElapsed = finishedMs - jobExecStart;
+    log.debug("Job execução concluída", {
+      jobId: job.id,
+      status: result.status,
+      exitCode: result.exitCode,
+      execMs: jobExecElapsed,
+      execSec: `${(jobExecElapsed / 1000).toFixed(1)}s`,
+    });
+
     await publishJobLogEvent(job.id, {
       type: "exit",
       code: result.exitCode ?? null,
       signal: null,
     });
+    log.debug("Finalizando billing", { jobId: job.id });
     await finishJobWithBilling(job.id, {
       status: result.status,
       exitCode: result.exitCode,
@@ -204,9 +258,19 @@ async function processOneJob(job) {
       finishedMs,
       billingEmail: job.requestedByEmail,
     });
-    await appendJobLogLine(job.id, `Job finalizado: ${result.status}`);
+    const durationSec = ((Date.now() - jobStartedMs) / 1000).toFixed(1);
+    log.info("Job concluído", {
+      jobId: job.id,
+      status: result.status,
+      exitCode: result.exitCode,
+      durationSec,
+    });
+    await appendJobLogLine(
+      job.id,
+      `Job finalizado: ${result.status} (${durationSec}s)\n`
+    );
   } catch (e) {
-    console.error(e);
+    log.error(e?.message || String(e), { jobId: job.id });
     try {
       const finishedMs = Date.now();
       await publishJobLogEvent(job.id, {
@@ -222,7 +286,7 @@ async function processOneJob(job) {
         billingEmail: job.requestedByEmail,
       });
     } catch (e2) {
-      console.error("complete failed", e2);
+      log.error("Falha ao completar job", { error: e2.message });
     }
   } finally {
     if (dashboardTimer) {
@@ -232,7 +296,7 @@ async function processOneJob(job) {
       await syncDashboardForJob(projectSlug, {
         taskId: job.taskId || undefined,
         jobId: job.id,
-      }).catch((e) => console.warn("dashboard sync (finally):", e.message));
+      }).catch((e) => log.warn("Dashboard sync (fim)", { error: e.message }));
     }
     if (job.requestedByEmail) {
       if (prevUsageEmail !== undefined) {
@@ -242,29 +306,38 @@ async function processOneJob(job) {
       }
     }
     running = false;
+    setImmediate(loop);
   }
 }
 
 async function loop() {
   if (running) return;
   try {
+    const claimStart = Date.now();
     const job = await claimJob(WORKER_ID);
     if (job) {
-      console.log("claimed", job.id, job.kind, job.projectSlug);
+      log.info("Job claimed", {
+        jobId: job.id,
+        kind: job.kind,
+        project: job.projectSlug,
+        task: job.taskId || "—",
+        executor: job.requestedByEmail || job.requestedByUserId || "—",
+        claimMs: Date.now() - claimStart,
+      });
       await processOneJob(job);
     }
   } catch (e) {
-    console.error("claim error", e.message);
+    log.error("Claim falhou", { error: e.message });
   }
 }
 
 async function main() {
   requireEnv("REDIS_URL");
-  console.log("CLI worker", {
-    TENANT_ID,
-    BACK_URL: process.env.BACK_URL,
-    REDIS_URL: process.env.REDIS_URL,
-    REPO_ROOT,
+  log.info("AI Factory CLI worker a iniciar", {
+    tenant: TENANT_ID.slice(0, 8) + "…",
+    workerId: WORKER_ID,
+    back: process.env.BACK_URL,
+    color: process.env.AI_FACTORY_LOG_COLOR !== "0",
   });
   await registerWorker(WORKER_ID);
   setInterval(() => heartbeat().catch(() => {}), 30_000);
@@ -273,6 +346,6 @@ async function main() {
 }
 
 main().catch((e) => {
-  console.error(e);
+  log.error("Worker terminou com erro", { error: e.message });
   process.exit(1);
 });

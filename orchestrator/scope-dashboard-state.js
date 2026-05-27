@@ -69,6 +69,9 @@ export function getScopeDashboardState(project, opts = {}) {
   const doc = readBacklogFile(backlogAbs, { project, macroId });
   const tasks = doc.tasks;
 
+  const runtimeState = Array.isArray(opts.tasksState) ? opts.tasksState : [];
+  const runtimeStateById = new Map(runtimeState.map((t) => [t.id, t]));
+
   const pendingPo = micros.filter((m) => m.validationStatus !== "approved").length;
   const approvedMicros = micros.filter(
     (m) => m.validationStatus === "approved" && m.approved === true
@@ -203,6 +206,30 @@ export function getScopeDashboardState(project, opts = {}) {
     microCount: micros.length,
     microsPendingPo: pendingPo,
     microsApproved: approvedMicros.length,
+    micros: approvedMicros.map((m) => ({
+      id: m.id,
+      title: m.title,
+      description: m.description || null,
+      risks: m.risks || null,
+      dependencies: m.dependencies || [],
+      priority: m.priority ?? null,
+      poScore: m.poScore ?? null,
+      taskDeliveryStatus: deliveryStatusById.get(m.id) || m.taskDeliveryStatus || "locked",
+      tasks: tasks
+        .filter((t) => t.sourceMicroId === m.id)
+        .map((t) => {
+          const rt = runtimeStateById.get(t.id);
+          return {
+            id: t.id,
+            title: t.title,
+            status: rt?.status || t.status,
+            lastCompletedStep: rt?.lastCompletedStep || null,
+            blockReason: rt?.blockReason || null,
+            failedStep: rt?.failedStep || null,
+            approved: t.approved,
+          };
+        }),
+    })),
     openMicro: openMicro
       ? {
           id: openMicro.id,

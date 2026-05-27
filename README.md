@@ -36,7 +36,7 @@ npm run pull-tenant-env -- <tenant-uuid>
 # Windows: .\scripts\start-tenant-worker.ps1 <tenant-uuid>
 ```
 
-`.env` do tenant (obrigatório): `TENANT_ID`, `BACK_URL`, `WORKER_SECRET`, `REDIS_URL`, `CURSOR_API_KEY`.
+`.env` do tenant (obrigatório): `TENANT_ID`, `BACK_URL`, `WORKER_SECRET`, `REDIS_URL`. Opcional: `CURSOR_ADMIN_API_KEY` (billing tenant). **Não** use `CURSOR_API_KEY` no `.env` — vem por job do executor na BD.
 
 ## Logs (Redis)
 
@@ -48,7 +48,7 @@ Gravação direta no Redis (`RPUSH` + `PUBLISH`), não por HTTP. `DEL` da lista 
 npm run scope|develop|task
 ```
 
-Requer `CURSOR_API_KEY` e `agent` no PATH (ou ambiente de dev com Cursor instalado).
+Requer `agent` no PATH; a chave de **chamada** (`CURSOR_API_KEY`) é injetada por job a partir do utilizador executor no back.
 
 ## Relacionados
 

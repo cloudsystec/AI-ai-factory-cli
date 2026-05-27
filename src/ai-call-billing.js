@@ -4,9 +4,12 @@ import {
   fetchAllFilteredUsageEvents,
   eventTimestampMs,
 } from "./cursor-admin-api.js";
+import { createLogger } from "./logger.js";
+
+const log = createLogger("billing");
 
 const DEFAULT_PER_CALL_USD = Number(
-  process.env.BILLING_CB_ESTIMATE_PER_CALL || 0.05
+  process.env.BILLING_CB_ESTIMATE_PER_CALL || 0.0
 );
 const MAX_MATCH_DELTA_MS = Number(
   process.env.BILLING_MAX_MATCH_DELTA_MS || 120_000
@@ -16,9 +19,14 @@ const START_BUFFER_MS = Number(
   process.env.CURSOR_USAGE_START_BUFFER_MS || 120_000
 );
 const END_BUFFER_MS = Number(process.env.CURSOR_USAGE_END_BUFFER_MS || 60_000);
+const CALL_SETTLE_DELAY_MS = Number(
+  process.env.BILLING_CALL_SETTLE_DELAY_MS || 15_000
+);
 
-/** @type {{ roundId: string, kind: string, label?: string, meta?: object, startedAtMs: number, calls: object[] } | null} */
-let currentRound = null;
+/** @type {Map<string, object>} */
+const activeCalls = new Map();
+/** @type {Promise[]} */
+const pendingSettlements = [];
 
 let signalHandlersInstalled = false;
 
@@ -171,27 +179,17 @@ function appendSessionLine(record) {
   fs.appendFileSync(sessionPath, `${JSON.stringify(record)}\n`, "utf-8");
 }
 
-/**
- * @param {{ kind: string, label?: string, meta?: object }} opts
- */
-export function beginBillingRound(opts) {
-  if (currentRound) {
-    endBillingRoundSync({ status: "interrupted", reason: "nova_rodada" });
-  }
-  const roundId = `round-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  currentRound = {
-    roundId,
-    kind: opts.kind,
-    label: opts.label,
-    meta: opts.meta ?? {},
-    startedAtMs: Date.now(),
-    calls: [],
-  };
-  return roundId;
-}
+// ---------------------------------------------------------------------------
+//  Per-call billing
+// ---------------------------------------------------------------------------
 
 /**
- * @param {{ agentFile: string, agentName?: string, skipped?: boolean }} opts
+ * @param {{
+ *   agentFile: string,
+ *   agentName?: string,
+ *   skipped?: boolean,
+ *   meta?: { project?: string, task?: string, step?: string, [k: string]: unknown },
+ * }} opts
  * @returns {string} callId
  */
 export function recordAiCallStart(opts) {
@@ -200,13 +198,18 @@ export function recordAiCallStart(opts) {
     id: callId,
     agentFile: opts.agentFile,
     agentName: opts.agentName ?? null,
+    meta: opts.meta || {},
     startedAtMs: Date.now(),
     endedAtMs: null,
     skipped: opts.skipped === true,
   };
-  if (currentRound) {
-    currentRound.calls.push(record);
-  }
+  activeCalls.set(callId, record);
+  log.debug("AI call registada", {
+    callId,
+    agent: opts.agentName || opts.agentFile,
+    ...record.meta,
+    skipped: record.skipped,
+  });
   return callId;
 }
 
@@ -214,90 +217,58 @@ export function recordAiCallStart(opts) {
  * @param {string} callId
  */
 export function recordAiCallEnd(callId) {
-  if (!currentRound) return;
-  const call = currentRound.calls.find((c) => c.id === callId);
-  if (call) {
-    call.endedAtMs = Date.now();
-  }
+  const call = activeCalls.get(callId);
+  if (!call) return;
+  call.endedAtMs = Date.now();
+  const durationMs = call.endedAtMs - call.startedAtMs;
+  log.debug("AI call finalizada", {
+    callId,
+    agent: call.agentName || call.agentFile,
+    durationMs,
+    durationSec: `${(durationMs / 1000).toFixed(1)}s`,
+  });
 }
 
 /**
- * Liquidação síncrona (sem API) — uso interno ao trocar rodada.
- * @param {{ status: string, reason?: string }} opts
+ * Inicia settlement assíncrono de uma chamada individual.
+ * Fire-and-forget: retorna Promise mas pode não ser awaited.
+ * @param {string} callId
  */
-function endBillingRoundSync(opts) {
-  if (!currentRound) return null;
-  const round = currentRound;
-  currentRound = null;
-  const settlement = {
-    type: "round_settled",
-    roundId: round.roundId,
-    kind: round.kind,
-    label: round.label,
-    status: opts.status,
-    reason: opts.reason,
-    callCount: round.calls.length,
-    totalCostBaseUsd: 0,
-    matchedCount: 0,
-    unmatchedCount: 0,
-    source: "empty",
-    settledAt: new Date().toISOString(),
-  };
-  appendSessionLine(settlement);
-  console.log(
-    `[billing-round] ${round.kind} status=${opts.status} chamadas=0 CB=$0.0000`
-  );
-  return settlement;
+export function settleAiCall(callId) {
+  const call = activeCalls.get(callId);
+  if (!call) return Promise.resolve(null);
+
+  if (call.skipped) {
+    const settlement = writeCallSettlement(call, {
+      costBaseUsd: 0,
+      chargedCents: 0,
+      source: "skipped",
+      cursorEventCount: 0,
+    });
+    activeCalls.delete(callId);
+    return Promise.resolve(settlement);
+  }
+
+  const promise = settleCallAsync(call);
+  pendingSettlements.push(promise);
+  return promise;
 }
 
 /**
- * @param {{ status?: string, headlessOnly?: boolean }} [opts]
+ * @param {object} call
  */
-export async function endBillingRound(opts = {}) {
-  const status = opts.status || "completed";
-  if (!currentRound) {
-    return null;
+async function settleCallAsync(call) {
+  if (CALL_SETTLE_DELAY_MS > 0) {
+    log.debug("Aguardando propagação Cursor API", {
+      callId: call.id,
+      delayMs: CALL_SETTLE_DELAY_MS,
+    });
+    await new Promise((r) => setTimeout(r, CALL_SETTLE_DELAY_MS));
   }
 
-  const round = currentRound;
-  currentRound = null;
-
-  const calls = round.calls.filter((c) => !c.skipped);
-  const email =
-    process.env.CURSOR_USAGE_EMAIL?.trim() || undefined;
-  const headlessOnly = opts.headlessOnly === true;
-
-  if (calls.length === 0) {
-    const settlement = {
-      type: "round_settled",
-      roundId: round.roundId,
-      kind: round.kind,
-      label: round.label,
-      status,
-      callCount: 0,
-      totalCostBaseUsd: 0,
-      matchedCount: 0,
-      unmatchedCount: 0,
-      orphanCents: 0,
-      source: "empty",
-      settledAt: new Date().toISOString(),
-    };
-    appendSessionLine(settlement);
-    console.log(
-      `[billing-round] ${round.kind} status=${status} chamadas=0 CB=$0.0000`
-    );
-    return settlement;
-  }
-
-  const roundStartMs = Math.min(...calls.map((c) => c.startedAtMs));
-  const roundEndMs = Math.max(
-    ...calls.map((c) => c.endedAtMs ?? c.startedAtMs)
-  );
-  const queryStart = roundStartMs - START_BUFFER_MS;
-  const queryEnd = roundEndMs + END_BUFFER_MS;
-
-  let matchResult;
-  let source = "estimate";
+  const email = process.env.CURSOR_USAGE_EMAIL?.trim() || undefined;
+  const queryStart = call.startedAtMs - START_BUFFER_MS;
+  const queryEnd = (call.endedAtMs || Date.now()) + END_BUFFER_MS;
 
   try {
     const { events, source: apiSource } = await fetchAllFilteredUsageEvents({
@@ -306,103 +277,141 @@ export async function endBillingRound(opts = {}) {
       email,
     });
 
+    log.debug("Eventos Cursor para call", {
+      callId: call.id,
+      agent: call.agentName || call.agentFile,
+      apiSource,
+      totalEvents: events.length,
+    });
+
     if (apiSource === "cursor_admin_api" && events.length > 0) {
-      const filtered = filterUsageEvents(events, { email, headlessOnly });
-      matchResult = matchCallsToUsageEvents(calls, filtered, {});
-      source = "cursor_admin_api";
-    } else {
-      matchResult = {
-        matched: calls.map((c) => ({
-          callId: c.id,
-          agentFile: c.agentFile,
-          unmatched: true,
-          costUsd: DEFAULT_PER_CALL_USD,
-          chargedCents: Math.round(DEFAULT_PER_CALL_USD * 100),
-        })),
-        orphanCents: 0,
-        orphanCount: 0,
-        totalCostBaseUsd:
-          Math.round(calls.length * DEFAULT_PER_CALL_USD * 1_000_000) /
-          1_000_000,
-        matchedCount: 0,
-        unmatchedCount: calls.length,
-      };
-      source = "estimate";
+      const filtered = filterUsageEvents(events, { email });
+      const matchResult = matchCallsToUsageEvents([call], filtered, {});
+      const match = matchResult.matched[0];
+
+      const totalCents =
+        (match?.chargedCents || 0) + (matchResult.orphanCents || 0);
+      const costBaseUsd =
+        Math.round((totalCents / 100) * 1_000_000) / 1_000_000;
+
+      const settlement = writeCallSettlement(call, {
+        costBaseUsd,
+        chargedCents: totalCents,
+        source: "cursor_admin_api",
+        cursorEventCount:
+          (match?.cursorEventCount || 0) + (matchResult.orphanCount || 0),
+        matchDeltaMs: match?.matchDeltaMs ?? null,
+      });
+      activeCalls.delete(call.id);
+      return settlement;
     }
+
+    const settlement = writeCallSettlement(call, {
+      costBaseUsd: DEFAULT_PER_CALL_USD,
+      chargedCents: Math.round(DEFAULT_PER_CALL_USD * 100),
+      source: "estimate",
+      cursorEventCount: 0,
+    });
+    activeCalls.delete(call.id);
+    return settlement;
   } catch (e) {
-    matchResult = {
-      matched: calls.map((c) => ({
-        callId: c.id,
-        agentFile: c.agentFile,
-        unmatched: true,
-        costUsd: DEFAULT_PER_CALL_USD,
-        chargedCents: Math.round(DEFAULT_PER_CALL_USD * 100),
-      })),
-      orphanCents: 0,
-      orphanCount: 0,
-      totalCostBaseUsd:
-        Math.round(calls.length * DEFAULT_PER_CALL_USD * 1_000_000) /
-        1_000_000,
-      matchedCount: 0,
-      unmatchedCount: calls.length,
-    };
-    source = "estimate";
-    console.warn(
-      `[billing-round] falha Admin API: ${e instanceof Error ? e.message : String(e)}`
-    );
+    log.warn("Settlement falhou", {
+      callId: call.id,
+      error: e instanceof Error ? e.message : String(e),
+    });
+    const settlement = writeCallSettlement(call, {
+      costBaseUsd: DEFAULT_PER_CALL_USD,
+      chargedCents: Math.round(DEFAULT_PER_CALL_USD * 100),
+      source: "estimate_error",
+      cursorEventCount: 0,
+    });
+    activeCalls.delete(call.id);
+    return settlement;
   }
+}
 
-  const totalCostBaseUsd = Math.max(0.01, matchResult.totalCostBaseUsd);
-
+/**
+ * @param {object} call
+ * @param {{ costBaseUsd: number, chargedCents: number, source: string, cursorEventCount: number, matchDeltaMs?: number|null }} result
+ */
+function writeCallSettlement(call, result) {
+  const durationMs = (call.endedAtMs || Date.now()) - call.startedAtMs;
   const settlement = {
-    type: "round_settled",
-    roundId: round.roundId,
-    kind: round.kind,
-    label: round.label,
-    status,
-    callCount: calls.length,
-    totalCostBaseUsd,
-    matchedCount: matchResult.matchedCount,
-    unmatchedCount: matchResult.unmatchedCount,
-    orphanCents: matchResult.orphanCents,
-    orphanCount: matchResult.orphanCount,
-    source,
-    queryStart,
-    queryEnd,
-    calls: matchResult.matched,
+    type: "call_settled",
+    callId: call.id,
+    agent: call.agentName || call.agentFile,
+    agentFile: call.agentFile,
+    project: call.meta.project || null,
+    task: call.meta.task || null,
+    step: call.meta.step || null,
+    meta: call.meta,
+    startedAtMs: call.startedAtMs,
+    endedAtMs: call.endedAtMs,
+    durationMs,
+    costBaseUsd: result.costBaseUsd,
+    chargedCents: result.chargedCents,
+    source: result.source,
+    cursorEventCount: result.cursorEventCount,
+    matchDeltaMs: result.matchDeltaMs ?? null,
     settledAt: new Date().toISOString(),
   };
 
   appendSessionLine(settlement);
 
-  console.log(
-    `[billing-round] ${round.kind} status=${status} chamadas=${calls.length} matched=${matchResult.matchedCount} unmatched=${matchResult.unmatchedCount} CB=$${totalCostBaseUsd.toFixed(4)} (${source})`
-  );
+  log.debug("Call settled", {
+    callId: call.id,
+    agent: settlement.agent,
+    task: settlement.task || "—",
+    step: settlement.step || "—",
+    cost: `$${result.costBaseUsd.toFixed(4)}`,
+    source: result.source,
+    durationSec: `${(durationMs / 1000).toFixed(1)}s`,
+  });
 
   return settlement;
 }
 
 /**
+ * Aguarda todas as liquidações pendentes (fire-and-forget) antes de sair.
+ */
+export async function flushPendingSettlements() {
+  if (pendingSettlements.length === 0) return;
+  log.debug("Flush: aguardando settlements pendentes", {
+    count: pendingSettlements.length,
+  });
+  const results = await Promise.allSettled(pendingSettlements);
+  pendingSettlements.length = 0;
+  const failed = results.filter((r) => r.status === "rejected");
+  if (failed.length > 0) {
+    log.warn("Flush: alguns settlements falharam", { failed: failed.length });
+  }
+}
+
+/**
  * @param {string} jobId
- * @returns {{ totalCostBaseUsd: number, roundCount: number }}
+ * @returns {{ totalCostBaseUsd: number, callCount: number }}
  */
 export function readJobBillingTotal(jobId) {
   const sessionPath = getBillingSessionPath(jobId);
   if (!sessionPath || !fs.existsSync(sessionPath)) {
-    return { totalCostBaseUsd: 0, roundCount: 0 };
+    return { totalCostBaseUsd: 0, callCount: 0 };
   }
 
   const lines = fs.readFileSync(sessionPath, "utf-8").split(/\r?\n/);
   let total = 0;
-  let roundCount = 0;
+  let callCount = 0;
 
   for (const line of lines) {
     if (!line.trim()) continue;
     try {
       const row = JSON.parse(line);
+      if (row.type === "call_settled") {
+        total += Number(row.costBaseUsd) || 0;
+        callCount += 1;
+      }
       if (row.type === "round_settled") {
         total += Number(row.totalCostBaseUsd) || 0;
-        roundCount += 1;
+        callCount += row.callCount || 0;
       }
     } catch {
       /* ignore */
@@ -411,7 +420,7 @@ export function readJobBillingTotal(jobId) {
 
   return {
     totalCostBaseUsd: Math.round(total * 1_000_000) / 1_000_000,
-    roundCount,
+    callCount,
   };
 }
 
@@ -426,32 +435,21 @@ export function clearBillingSession(jobId) {
   }
 }
 
-export function getOpenBillingRound() {
-  return currentRound;
-}
-
 export function installBillingSignalHandlers() {
   if (signalHandlersInstalled) return;
   signalHandlersInstalled = true;
 
   const onSignal = async (sig) => {
-    if (currentRound) {
-      try {
-        await endBillingRound({ status: "interrupted" });
-      } catch (e) {
-        console.warn(
-          `[billing] settle on ${sig}:`,
-          e instanceof Error ? e.message : String(e)
-        );
-      }
+    try {
+      await flushPendingSettlements();
+    } catch (e) {
+      log.warn(`Billing flush on ${sig}`, {
+        error: e instanceof Error ? e.message : String(e),
+      });
     }
     process.exit(sig === "SIGINT" ? 130 : 143);
   };
 
-  process.on("SIGINT", () => {
-    onSignal("SIGINT");
-  });
-  process.on("SIGTERM", () => {
-    onSignal("SIGTERM");
-  });
+  process.on("SIGINT", () => onSignal("SIGINT"));
+  process.on("SIGTERM", () => onSignal("SIGTERM"));
 }

@@ -3,8 +3,11 @@ import {
   getCursorAdminApiKey,
   sumChargedUsdInWindow,
 } from "./cursor-admin-api.js";
+import { createLogger } from "./logger.js";
 
-const DEFAULT_CB = Number(process.env.BILLING_CB_ESTIMATE_USD || 0.5);
+const log = createLogger("cost");
+
+const DEFAULT_CB = Number(process.env.BILLING_CB_ESTIMATE_USD || 0.0);
 const START_BUFFER_MS = Number(process.env.CURSOR_USAGE_START_BUFFER_MS || 120_000);
 const END_BUFFER_MS = Number(process.env.CURSOR_USAGE_END_BUFFER_MS || 60_000);
 
@@ -25,7 +28,11 @@ export async function resolveJobCostBaseUsd(opts) {
     process.env.CURSOR_USAGE_EMAIL?.trim() ||
     undefined;
 
+  const jobDurationSec = ((finishedMs - startedMs) / 1000).toFixed(1);
+  log.debug(`Resolvendo custo do job`, { email: email || "—", jobDurationSec: `${jobDurationSec}s` });
+
   if (!getCursorAdminApiKey()) {
+    log.debug(`CURSOR_ADMIN_API_KEY ausente, usando estimativa`, { defaultCB: DEFAULT_CB });
     return {
       costBaseUsd: DEFAULT_CB,
       source: "estimate",
@@ -35,12 +42,20 @@ export async function resolveJobCostBaseUsd(opts) {
 
   const queryStart = startedMs - START_BUFFER_MS;
   const queryEnd = finishedMs + END_BUFFER_MS;
+  const fetchStartMs = Date.now();
 
   try {
     const { events } = await fetchAllFilteredUsageEvents({
       startDate: queryStart,
       endDate: queryEnd,
       email,
+    });
+    const fetchElapsedMs = Date.now() - fetchStartMs;
+
+    log.debug(`Eventos Cursor buscados`, {
+      count: events.length,
+      fetchMs: fetchElapsedMs,
+      windowMs: queryEnd - queryStart,
     });
 
     const summary = sumChargedUsdInWindow(events, {
@@ -51,6 +66,7 @@ export async function resolveJobCostBaseUsd(opts) {
     });
 
     if (summary.eventCount === 0) {
+      log.debug(`Nenhum evento na janela, usando estimativa`, { defaultCB: DEFAULT_CB });
       return {
         costBaseUsd: DEFAULT_CB,
         source: "estimate",
@@ -63,8 +79,13 @@ export async function resolveJobCostBaseUsd(opts) {
       };
     }
 
+    log.debug(`Custo resolvido via Admin API`, {
+      CB: `$${summary.costBaseUsd.toFixed(4)}`,
+      events: summary.eventCount,
+    });
+
     return {
-      costBaseUsd: Math.max(0.01, summary.costBaseUsd),
+      costBaseUsd: summary.costBaseUsd,
       source: "cursor_admin_api",
       detail: {
         ...summary,
@@ -74,6 +95,7 @@ export async function resolveJobCostBaseUsd(opts) {
       },
     };
   } catch (e) {
+    log.warn(`Falha Cursor Admin API`, { error: e instanceof Error ? e.message : String(e), defaultCB: DEFAULT_CB });
     return {
       costBaseUsd: DEFAULT_CB,
       source: "estimate",

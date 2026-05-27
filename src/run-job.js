@@ -1,10 +1,20 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { REPO_ROOT, orchestratorImport } from "./repo-root.js";
+import { createLogger } from "./logger.js";
+
+const log = createLogger("job");
 import { getDevelopSettingsFromBack } from "./back-client.js";
 import { ensureTenantProjectReady } from "./ensure-tenant-project.js";
 
 export { REPO_ROOT };
+
+const CURSOR_AGENT_JOB_KINDS = new Set([
+  "scope",
+  "scope-tasks-only",
+  "develop",
+  "task",
+]);
 
 /**
  * @param {object} job
@@ -22,6 +32,9 @@ export async function runJobLocally(job, onLine) {
     "scope-tasks-only",
     "develop",
     "task",
+    "tech-lead-review",
+    "micro-integration-qa",
+    "micro-release",
   ]).has(job.kind);
 
   if (needsMacro && project) {
@@ -40,6 +53,25 @@ export async function runJobLocally(job, onLine) {
     }
   }
 
+  if (
+    job.kind === "tech-lead-review" ||
+    job.kind === "micro-integration-qa" ||
+    job.kind === "micro-release"
+  ) {
+    const mod = await orchestratorImport(
+      job.kind === "tech-lead-review"
+        ? "run-tech-lead-review.js"
+        : job.kind === "micro-integration-qa"
+          ? "run-micro-integration-qa.js"
+          : "run-micro-release.js"
+    );
+    const exitCode = await mod.run(job, onLine);
+    return {
+      exitCode,
+      status: exitCode === 0 ? "succeeded" : "failed",
+    };
+  }
+
   const { buildJobCommand } = await orchestratorImport("dashboard-job-runner.js");
   const macroId = job.macroId || project;
   const built = buildJobCommand(job.kind, project, macroId, job.taskId);
@@ -49,16 +81,29 @@ export async function runJobLocally(job, onLine) {
     ? path.join(tenantRoot, "billing-sessions")
     : undefined;
 
-  const env = {
-    ...process.env,
-    AI_FACTORY_WORKSPACES_DIR: process.env.AI_FACTORY_WORKSPACES_DIR,
-    AI_FACTORY_MACRO_DIR: process.env.AI_FACTORY_MACRO_DIR,
-    CURSOR_API_KEY: job.cursorApiKey || undefined,
-    AI_FACTORY_JOB_ID: job.id,
-    ...(billingSessionDir
-      ? { AI_FACTORY_BILLING_SESSION_DIR: billingSessionDir }
-      : {}),
-  };
+  if (CURSOR_AGENT_JOB_KINDS.has(job.kind) && !job.cursorApiKey) {
+    throw new Error(
+      "Chave Cursor do executor em falta (grave a API key no utilizador executor ou reconecte Play)."
+    );
+  }
+
+  const env = { ...process.env };
+  delete env.CURSOR_API_KEY;
+  if (job.cursorApiKey) {
+    env.CURSOR_API_KEY = job.cursorApiKey;
+  }
+  env.AI_FACTORY_WORKSPACES_DIR = process.env.AI_FACTORY_WORKSPACES_DIR;
+  env.AI_FACTORY_MACRO_DIR = process.env.AI_FACTORY_MACRO_DIR;
+  env.AI_FACTORY_GITHUB_TOKEN = job.githubInstallationToken || undefined;
+  env.AI_FACTORY_GIT_REPO = job.git?.repoFullName || undefined;
+  env.AI_FACTORY_TECH_LEAD_BRANCH = job.git?.techLeadBranch || "tech-lead";
+  env.AI_FACTORY_JOB_ID = job.id;
+  if (job.requestedByUserId) {
+    env.AI_FACTORY_EXECUTOR_USER_ID = job.requestedByUserId;
+  }
+  if (billingSessionDir) {
+    env.AI_FACTORY_BILLING_SESSION_DIR = billingSessionDir;
+  }
   if (project && process.env.AI_FACTORY_WORKSPACES_DIR) {
     env.AI_FACTORY_ACTIVE_PROJECT = project;
     env.AI_FACTORY_AGENTS_DIR = path.join(
@@ -67,8 +112,19 @@ export async function runJobLocally(job, onLine) {
       "agents"
     );
   }
+  const resumeStep = job.payload?.resumeFromStep || job.payload?.retryFromStep;
+  if (resumeStep) {
+    env.AI_FACTORY_RESUME_STEP = resumeStep;
+  }
+  if (job.payload?.retryMode) {
+    env.AI_FACTORY_RETRY_MODE = job.payload.retryMode;
+  }
+  if (job.payload?.failedStep) {
+    env.AI_FACTORY_FAILED_STEP = job.payload.failedStep;
+  }
 
   return new Promise((resolve, reject) => {
+    log.info("Executar comando", { command: built.command });
     onLine(`$ ${built.command}\n`);
 
     const child = spawn(built.executable, built.argv, {
@@ -110,17 +166,43 @@ export async function runJobLocally(job, onLine) {
  */
 async function runProvisionJob(job, onLine) {
   const { ensureProjectFiles } = await orchestratorImport("create-project.js");
+  const { provisionProjectGit } = await orchestratorImport(
+    "git/provision-repo.js"
+  );
+  const { notifyProvisionComplete } = await import("./back-client.js");
   const payload = job.payload || {};
   const slug = payload.slug || job.projectSlug;
   const name = payload.name || slug;
   const scope = payload.scope || "";
+  const git = payload.git || null;
   onLine(`Provisionando projeto ${slug}…\n`);
   try {
     const created = ensureProjectFiles({ name, slug, scope });
     onLine(`Projeto criado: ${created.project}\n`);
+    if (git?.repoFullName) {
+      provisionProjectGit(
+        slug,
+        {
+          repoFullName: git.repoFullName,
+          defaultBranch: git.defaultBranch || "main",
+          techLeadBranch: git.techLeadBranch || "tech-lead",
+          token: job.githubInstallationToken,
+        },
+        onLine
+      );
+      await notifyProvisionComplete(slug, { status: "ready" });
+    }
     return { exitCode: 0, status: "succeeded" };
   } catch (e) {
     onLine(`Erro: ${e.message}\n`);
+    try {
+      await notifyProvisionComplete(slug, {
+        status: "failed",
+        error: e.message,
+      });
+    } catch {
+      /* ignore */
+    }
     return { exitCode: 1, status: "failed" };
   }
 }

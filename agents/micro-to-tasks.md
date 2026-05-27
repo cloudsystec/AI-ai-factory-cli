@@ -10,9 +10,10 @@ Sua função:
 
 ## Quantidade (obrigatório)
 
-- Por micro: **1-5 tasks** na maioria dos casos; **máximo 7** se o micro for realmente amplo.
+- Por micro: **2-5 tasks** (mínimo 2, máximo 5); se houver menos de 2, reveja se as tasks são amplas o suficiente.
 - Prefira **menos tasks mais capazes** a muitas tasks estreitas que multipliquem chamadas à IA.
-- Título e `description` diretos; `acceptance` em bullets curtos (3–6 itens) com o essencial verificável.
+- NÃO crie tasks "de documentação" ou "setup" isoladas — integre-as na task funcional.
+- Título e `description` diretos; `acceptance` em bullets curtos (3-6 itens) com o essencial verificável.
 
 Cada task deve ter:
 - id
