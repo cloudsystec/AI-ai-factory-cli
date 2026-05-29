@@ -122,6 +122,9 @@ export async function runJobLocally(job, onLine) {
   if (job.payload?.failedStep) {
     env.AI_FACTORY_FAILED_STEP = job.payload.failedStep;
   }
+  if (job.kind === "scope-tasks-only" && job.payload?.microId) {
+    env.AI_FACTORY_TARGET_MICRO_ID = String(job.payload.microId);
+  }
 
   return new Promise((resolve, reject) => {
     log.info("Executar comando", { command: built.command });

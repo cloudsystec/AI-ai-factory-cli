@@ -31,7 +31,13 @@ export async function backFetch(path, init = {}) {
 
   const method = init.method || "GET";
   const startMs = Date.now();
-  const silent = path === "/worker/claim" || path === "/worker/heartbeat";
+  const silent =
+    path === "/worker/claim"
+    || path === "/worker/heartbeat"
+    || path === "/worker/runtime-sync"
+    || path === "/worker/pr-resolution/claim"
+    || path === "/worker/dispatch-tick"
+    || path.startsWith("/worker/active-projects");
   if (!silent) log.debug(`→ ${method} ${path}`);
 
   let lastErr;
@@ -69,16 +75,39 @@ export async function registerWorker(workerId) {
 }
 
 /**
- * @param {string} workerId
- * @returns {Promise<object|null>}
+ * @returns {Promise<{ slotsMax: number, workers: Array<{ slot: number, botReady: boolean, botEmail?: string|null }> }>}
  */
-export async function claimJob(workerId) {
+export async function fetchBotsReady() {
+  const res = await backFetch("/worker/bots-ready");
+  return res.json();
+}
+
+/**
+ * @param {string} workerId
+ * @returns {Promise<{ job: object|null, botEmail?: string|null, workerSlot?: number, error?: string }>}
+ */
+/**
+ * @param {string} workerId
+ * @param {{ provisionOnly?: boolean }} [opts]
+ */
+export async function claimJob(workerId, opts = {}) {
   const res = await backFetch("/worker/claim", {
     method: "POST",
-    body: JSON.stringify({ workerId }),
+    body: JSON.stringify({
+      workerId,
+      provisionOnly: opts.provisionOnly === true,
+    }),
   });
   const data = await res.json();
-  return data.job;
+  if (data.error === "bot_not_configured") {
+    return { job: null, error: data.error, workerSlot: data.workerSlot };
+  }
+  return {
+    job: data.job ?? null,
+    botEmail: data.botEmail ?? data.job?.botEmail ?? null,
+    workerSlot: data.workerSlot ?? data.job?.workerSlot,
+    error: data.error,
+  };
 }
 
 /**
@@ -114,8 +143,75 @@ export async function updateJobBilling(jobId, payload) {
   });
 }
 
-export async function heartbeat() {
-  await backFetch("/worker/heartbeat", { method: "POST", body: "{}" });
+/**
+ * @param {string} [workerId]
+ */
+export async function heartbeat(workerId) {
+  const body = workerId ? JSON.stringify({ workerId }) : "{}";
+  await backFetch("/worker/heartbeat", { method: "POST", body });
+}
+
+/**
+ * Reporta ao back o estado real dos slots (fonte da verdade = CLI).
+ * @param {{ slots: Array<{ slot: number, workerId: string, busy: boolean, jobId?: string|null }>, startup?: boolean }} payload
+ */
+export async function reportRuntimeSync(payload) {
+  const res = await backFetch("/worker/runtime-sync", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  return res.json();
+}
+
+/**
+ * @param {string} workerId
+ * @returns {Promise<{ work: object|null }>}
+ */
+export async function claimPrResolution(workerId) {
+  const res = await backFetch("/worker/pr-resolution/claim", {
+    method: "POST",
+    body: JSON.stringify({ workerId }),
+  });
+  return res.json();
+}
+
+/**
+ * @param {{ projectSlug: string, taskId: string, status: string, summary?: string }} payload
+ */
+export async function completePrResolution(payload) {
+  await backFetch("/worker/pr-resolution/complete", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+/**
+ * @param {string} workerId
+ */
+export async function fetchActiveProjects(workerId) {
+  const res = await backFetch(
+    `/worker/active-projects?workerId=${encodeURIComponent(workerId)}`
+  );
+  return res.json();
+}
+
+/**
+ * @param {string} workerId
+ */
+export async function dispatchTick(workerId) {
+  const res = await backFetch("/worker/dispatch-tick", {
+    method: "POST",
+    body: JSON.stringify({ workerId }),
+  });
+  return res.json();
+}
+
+export async function ensureGitProvision() {
+  const res = await backFetch("/worker/ensure-git-provision", {
+    method: "POST",
+    body: "{}",
+  });
+  return res.json();
 }
 
 /**

@@ -27,8 +27,15 @@ process.env.AI_FACTORY_MACRO_DIR = path.join(tenantRoot, "scopes", "macro");
 const {
   claimJob,
   completeJob,
+  fetchBotsReady,
   heartbeat,
   registerWorker,
+  reportRuntimeSync,
+  claimPrResolution,
+  completePrResolution,
+  dispatchTick,
+  ensureGitProvision,
+  fetchActiveProjects,
   updateJobBilling,
 } = await import("./back-client.js");
 const {
@@ -47,11 +54,60 @@ const {
 const { createLogger, redactForClient } = await import("./logger.js");
 
 const log = createLogger("worker");
-const WORKER_ID = process.env.WORKER_ID || `cli-${TENANT_ID.slice(0, 8)}`;
+const TENANT_PREFIX = TENANT_ID.slice(0, 8);
 const POLL_MS = Number(process.env.CLAIM_POLL_MS || 1000);
 const DASHBOARD_SYNC_MS = Number(process.env.DASHBOARD_SYNC_MS || 5000);
+const BOTS_READY_REFRESH_MS = Number(
+  process.env.BOTS_READY_REFRESH_MS || 300_000
+);
+const RUNTIME_SYNC_MS = Number(process.env.RUNTIME_SYNC_MS || 15_000);
 
-let running = false;
+/** @type {Map<number, boolean>} */
+const runningBySlot = new Map();
+/** @type {Map<number, string>} */
+const currentJobBySlot = new Map();
+/** @type {number[]} */
+let activeSlots = [];
+
+function workerIdForSlot(slot) {
+  return `cli-${TENANT_PREFIX}-slot-${slot}`;
+}
+
+function buildRuntimeSlots() {
+  return activeSlots.map((slot) => ({
+    slot,
+    workerId: workerIdForSlot(slot),
+    busy: runningBySlot.get(slot) === true,
+    jobId: currentJobBySlot.get(slot) ?? null,
+  }));
+}
+
+/**
+ * @param {{ startup?: boolean }} [opts]
+ */
+async function syncRuntimeToBack(opts = {}) {
+  if (activeSlots.length === 0 && !opts.startup) return null;
+  try {
+    const result = await reportRuntimeSync({
+      slots: buildRuntimeSlots(),
+      startup: opts.startup === true,
+    });
+    if (opts.startup && result?.failed?.length) {
+      log.info("Runtime sync (startup): jobs órfãos no back", {
+        count: result.failed.length,
+      });
+    }
+    if (opts.startup && result?.executionUpdates?.length) {
+      log.info("Runtime sync (startup): pools de execução alinhados", {
+        projects: result.executionUpdates.map((u) => u.project),
+      });
+    }
+    return result;
+  } catch (e) {
+    log.warn("Runtime sync falhou", { error: e.message });
+    return null;
+  }
+}
 
 /**
  * @param {string} projectSlug
@@ -145,8 +201,13 @@ function settleBillingInBackground(jobId, opts) {
   }, BILLING_SETTLE_DELAY_MS);
 }
 
-async function processOneJob(job) {
-  running = true;
+/**
+ * @param {object} job
+ * @param {{ workerId: string, slot: number, botEmail?: string|null }} ctx
+ */
+async function processOneJob(job, ctx) {
+  const { workerId, slot, botEmail } = ctx;
+  const billingEmail = botEmail || job.botEmail || null;
   const jobStartedMs = Date.now();
   const projectSlug =
     job.projectSlug ||
@@ -161,8 +222,8 @@ async function processOneJob(job) {
   });
 
   const prevUsageEmail = process.env.CURSOR_USAGE_EMAIL;
-  if (job.requestedByEmail) {
-    process.env.CURSOR_USAGE_EMAIL = job.requestedByEmail;
+  if (billingEmail) {
+    process.env.CURSOR_USAGE_EMAIL = billingEmail;
   }
 
   /** @type {ReturnType<typeof setInterval>|null} */
@@ -179,7 +240,7 @@ async function processOneJob(job) {
     clearBillingSession(job.id);
     await appendJobLogLine(
       job.id,
-      `Worker ${WORKER_ID} iniciou job ${job.kind}`
+      `Worker ${workerId} (slot ${slot}) iniciou job ${job.kind}`
     );
 
     const prevProject = process.env.AI_FACTORY_ACTIVE_PROJECT;
@@ -256,11 +317,12 @@ async function processOneJob(job) {
       exitCode: result.exitCode,
       startedMs: jobStartedMs,
       finishedMs,
-      billingEmail: job.requestedByEmail,
+      billingEmail,
     });
     const durationSec = ((Date.now() - jobStartedMs) / 1000).toFixed(1);
     log.info("Job concluído", {
       jobId: job.id,
+      slot,
       status: result.status,
       exitCode: result.exitCode,
       durationSec,
@@ -283,7 +345,7 @@ async function processOneJob(job) {
         exitCode: 1,
         startedMs: jobStartedMs,
         finishedMs,
-        billingEmail: job.requestedByEmail,
+        billingEmail,
       });
     } catch (e2) {
       log.error("Falha ao completar job", { error: e2.message });
@@ -298,51 +360,236 @@ async function processOneJob(job) {
         jobId: job.id,
       }).catch((e) => log.warn("Dashboard sync (fim)", { error: e.message }));
     }
-    if (job.requestedByEmail) {
+    if (billingEmail) {
       if (prevUsageEmail !== undefined) {
         process.env.CURSOR_USAGE_EMAIL = prevUsageEmail;
       } else {
         delete process.env.CURSOR_USAGE_EMAIL;
       }
     }
-    running = false;
-    setImmediate(loop);
+    runningBySlot.set(slot, false);
+    currentJobBySlot.delete(slot);
+    void syncRuntimeToBack();
+    setImmediate(() => loopForSlot(slot));
   }
 }
 
-async function loop() {
-  if (running) return;
+/**
+ * Antes de claim de job: resolve PR parado (conflito) — merge tech-lead na head, push, merge API.
+ * @param {number} slot
+ * @param {string} workerId
+ * @returns {Promise<boolean>} true se tratou um PR (repetir loop)
+ */
+async function tryResolveStuckPr(slot, workerId) {
+  let work;
   try {
-    const claimStart = Date.now();
-    const job = await claimJob(WORKER_ID);
-    if (job) {
-      log.info("Job claimed", {
-        jobId: job.id,
-        kind: job.kind,
-        project: job.projectSlug,
-        task: job.taskId || "—",
-        executor: job.requestedByEmail || job.requestedByUserId || "—",
-        claimMs: Date.now() - claimStart,
-      });
-      await processOneJob(job);
-    }
+    const data = await claimPrResolution(workerId);
+    work = data?.work ?? null;
   } catch (e) {
-    log.error("Claim falhou", { error: e.message });
+    log.warn("PR resolution claim falhou", { slot, error: e.message });
+    return false;
   }
+  if (!work) return false;
+
+  const logJobId = work.jobId || null;
+  runningBySlot.set(slot, true);
+  if (logJobId) currentJobBySlot.set(slot, logJobId);
+
+  const onLine = (line) => {
+    const t = String(line || "").trimEnd();
+    if (t) log.info(t, { slot, pr: work.prNumber });
+    if (logJobId) {
+      void appendJobLogLine(logJobId, line).catch(() => {});
+      void publishJobLogEvent(logJobId, { type: "stdout", text: line }).catch(
+        () => {}
+      );
+    }
+  };
+
+  log.info("PR resolution iniciada", {
+    slot,
+    project: work.projectSlug,
+    task: work.taskId,
+    pr: work.prNumber,
+  });
+
+  try {
+    const { resolveStuckPullRequest } = await import(
+      "../orchestrator/resolve-stuck-pr.js"
+    );
+    await resolveStuckPullRequest(work, onLine);
+  } catch (e) {
+    log.error("PR resolution erro", { slot, error: e.message });
+    try {
+      await completePrResolution({
+        projectSlug: work.projectSlug,
+        taskId: work.taskId,
+        status: "failed",
+        summary: e.message,
+      });
+    } catch {
+      /* ignore */
+    }
+  } finally {
+    runningBySlot.set(slot, false);
+    if (logJobId) currentJobBySlot.delete(slot);
+    void syncRuntimeToBack();
+  }
+
+  return true;
+}
+
+async function slotHasPlay(slot) {
+  const workerId = workerIdForSlot(slot);
+  try {
+    const data = await fetchActiveProjects(workerId);
+    return Array.isArray(data.projects) && data.projects.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+async function tryClaimProvision(slot, workerId) {
+  try {
+    const claimed = await claimJob(workerId, { provisionOnly: true });
+    if (claimed.error === "bot_not_configured") return false;
+    const job = claimed.job;
+    if (!job || job.kind !== "provision") return false;
+    log.info("Provision claimed", {
+      slot,
+      jobId: job.id,
+      project: job.projectSlug,
+    });
+    runningBySlot.set(slot, true);
+    currentJobBySlot.set(slot, job.id);
+    void syncRuntimeToBack();
+    await processOneJob(job, {
+      workerId,
+      slot,
+      botEmail: claimed.botEmail || job.botEmail,
+    });
+    return true;
+  } catch (e) {
+    log.warn("Provision claim falhou", { slot, error: e.message });
+    return false;
+  }
+}
+
+async function loopForSlot(slot) {
+  if (runningBySlot.get(slot)) return;
+  const workerId = workerIdForSlot(slot);
+
+  const inPlay = await slotHasPlay(slot);
+
+  if (!inPlay) {
+    const didProvision = await tryClaimProvision(slot, workerId);
+    if (didProvision) {
+      setImmediate(() => loopForSlot(slot));
+    }
+    return;
+  }
+
+  try {
+    const prHandled = await tryResolveStuckPr(slot, workerId);
+    if (prHandled) {
+      setImmediate(() => loopForSlot(slot));
+      return;
+    }
+
+    await dispatchTick(workerId).catch((e) =>
+      log.warn("dispatch-tick falhou", { slot, error: e.message })
+    );
+
+    const claimStart = Date.now();
+    let claimed = await claimJob(workerId);
+    if (claimed.error === "bot_not_configured") {
+      log.warn("Bot não configurado para slot", { slot });
+      return;
+    }
+    let job = claimed.job;
+    if (!job) {
+      await dispatchTick(workerId).catch(() => {});
+      claimed = await claimJob(workerId);
+      job = claimed.job;
+    }
+    if (!job) return;
+    log.info("Job claimed", {
+      slot,
+      jobId: job.id,
+      kind: job.kind,
+      project: job.projectSlug,
+      task: job.taskId || "—",
+      executor: job.requestedByEmail || job.requestedByUserId || "—",
+      bot: claimed.botEmail || job.botEmail || "—",
+      claimMs: Date.now() - claimStart,
+    });
+    runningBySlot.set(slot, true);
+    currentJobBySlot.set(slot, job.id);
+    void syncRuntimeToBack();
+    await processOneJob(job, {
+      workerId,
+      slot,
+      botEmail: claimed.botEmail || job.botEmail,
+    });
+  } catch (e) {
+    log.error("Claim falhou", { slot, error: e.message });
+  }
+}
+
+async function refreshActiveSlots() {
+  const data = await fetchBotsReady();
+  const ready = (data.workers || [])
+    .filter((w) => w.botReady)
+    .map((w) => w.slot);
+  if (ready.length === 0) {
+    log.warn("Nenhum bot configurado — aguardando admin da plataforma");
+    activeSlots = [];
+    return;
+  }
+  const prev = new Set(activeSlots);
+  activeSlots = ready;
+  for (const slot of ready) {
+    if (!prev.has(slot)) {
+      const workerId = workerIdForSlot(slot);
+      await registerWorker(workerId).catch((e) =>
+        log.warn("Register slot falhou", { slot, error: e.message })
+      );
+      runningBySlot.set(slot, false);
+      setInterval(() => loopForSlot(slot), POLL_MS);
+      loopForSlot(slot);
+      log.info("Loop iniciado para slot", { slot, workerId });
+    }
+  }
+  if (ready.length > 0) {
+    void syncRuntimeToBack();
+  }
+}
+
+async function heartbeatAll() {
+  for (const slot of activeSlots) {
+    await heartbeat(workerIdForSlot(slot)).catch(() => {});
+  }
+  await syncRuntimeToBack();
 }
 
 async function main() {
   requireEnv("REDIS_URL");
   log.info("AI Factory CLI worker a iniciar", {
-    tenant: TENANT_ID.slice(0, 8) + "…",
-    workerId: WORKER_ID,
+    tenant: TENANT_PREFIX + "…",
     back: process.env.BACK_URL,
     color: process.env.AI_FACTORY_LOG_COLOR !== "0",
   });
-  await registerWorker(WORKER_ID);
-  setInterval(() => heartbeat().catch(() => {}), 30_000);
-  setInterval(loop, POLL_MS);
-  await loop();
+  await refreshActiveSlots();
+  await ensureGitProvision().catch((e) =>
+    log.warn("ensure-git-provision falhou", { error: e.message })
+  );
+  await syncRuntimeToBack({ startup: true });
+  setInterval(() => heartbeatAll().catch(() => {}), 30_000);
+  setInterval(() => syncRuntimeToBack().catch(() => {}), RUNTIME_SYNC_MS);
+  setInterval(() => ensureGitProvision().catch(() => {}), 60_000);
+  setInterval(() => refreshActiveSlots().catch((e) => {
+    log.warn("Refresh bots-ready falhou", { error: e.message });
+  }), BOTS_READY_REFRESH_MS);
 }
 
 main().catch((e) => {

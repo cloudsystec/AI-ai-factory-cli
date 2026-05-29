@@ -18,8 +18,8 @@ Este repositório é o **cliente** que corre na infraestrutura do tenant (ou do 
 | **Backend** (API) | `BACK_URL` | URL publicada (ex. `http://host.docker.internal:4000` em dev Docker) |
 | **Redis** (logs) | `REDIS_URL` | **Docker (worker):** `redis://host.docker.internal:6379` se Redis no PC; **N8N:** `redis://redis-stack:6379`. Não uses `127.0.0.1` dentro do container. |
 | **Cursor Admin API** | `CURSOR_ADMIN_API_KEY` | Chave **Admin** do tenant (gravada no back, exportada por `pull-tenant-env`) — billing via Admin API |
-| **Cursor (execução)** | *(por job)* | `CURSOR_API_KEY` do **executor** que iniciou o job — enviada no `POST /worker/claim`, não no `.env` |
-| **Billing** | `CURSOR_USAGE_EMAIL` | Definido automaticamente com o email do executor do job (override opcional no `.env`) |
+| **Cursor (execução)** | *(por job / slot)* | `CURSOR_API_KEY` do **bot** do slot — enviada no `POST /worker/claim`, não no `.env` |
+| **Billing** | `CURSOR_USAGE_EMAIL` | Email do **bot** que executou o job (match na Admin API) |
 | **Cursor CLI** | `CURSOR_AGENT` (opcional) | Default na imagem: `agent` |
 | **Logs** | `AI_FACTORY_LOG_COLOR`, `AI_FACTORY_LOG_LEVEL` | Cores em `docker logs` (default `COLOR=1` na imagem) |
 
@@ -32,7 +32,30 @@ docker compose -f docker-compose.cli.yml --profile daniel up -d --build
 docker logs -f cli-tenant-daniel
 ```
 
-Variáveis: `AI_FACTORY_LOG_COLOR=1` (cores), `AI_FACTORY_LOG_LEVEL=info|debug|warn|error`. O portal continua a receber logs **sem** códigos ANSI (Redis). Jobs de pipeline exigem API key Cursor configurada no executor (admin plataforma).
+Variáveis: `AI_FACTORY_LOG_COLOR=1` (cores), `AI_FACTORY_LOG_LEVEL=info|debug|warn|error`. O portal continua a receber logs **sem** códigos ANSI (Redis). Cada **slot** (bot) precisa de email + API key configurados pelo admin da plataforma (menu **Bots**).
+
+### Vários bots no mesmo container (plano Team, etc.)
+
+- **1 container Docker por tenant** — não há um container por bot.
+- O processo `worker.js` arranca **um loop de claim por slot** configurado (`cli-<tenant>-slot-1`, `cli-<tenant>-slot-2`, …).
+- O backend enfileira até N jobs `task` em paralelo (`selected_worker_slots` = bots com ▶ neste projecto); use **▶ Todos** no front para ligar todos os bots configurados de uma vez.
+- Cada slot com bot configurado no admin tem loop próprio no CLI; só claima jobs se esse slot estiver em Play no projecto.
+- Locks: uma `task` por vez por `task_id`; `scope` / onda de micro são serializados por lock.
+- `GET /worker/bots-ready` no arranque; reconsulta a cada `BOTS_READY_REFRESH_MS` (default 5 min) se o admin configurar bots depois.
+- **Fonte da verdade dos bots = CLI:** `POST /worker/runtime-sync` no arranque (`startup: true`) e periodicamente (`RUNTIME_SYNC_MS`, default 15s). O CLI reporta `busy`/`jobId` por slot; o back reconcilia jobs presos e alinha o pool de execução (▶ no portal).
+- **Ordem do loop (por slot, só com ▶ Play no projecto):** (1) `POST /worker/pr-resolution/claim` se houver PR pendente/conflito; (2) `POST /worker/dispatch-tick` enfileira trabalho; (3) `POST /worker/claim` job; (4) se vazio, novo `dispatch-tick` + retry claim. Slot em ⏸ não faz nada (`GET /worker/active-projects`).
+- **Paralelismo:** `agent_slots_in_use` conta só jobs `running`/`waiting_input` (não `queued`). Budget de tasks = `|bots Play|` − tasks a correr.
+- **Modos de dispatch (por projecto):**
+
+| Situação | Job | Paralelismo |
+|----------|-----|-------------|
+| Sem micros | `scope` (macro) | 1 bot (serial) |
+| Micro aberto, 0 tasks | `scope-tasks-only` | 1 bot |
+| Tasks no A fazer | `task` | multi-bot |
+| Sem todo elegível, dev em curso | `scope-tasks-only` no **próximo** micro | 1 bot (paralelo ao dev) |
+| Dev de task | só micro **aberto** (`openMicroId`) | — |
+
+- **PRs com conflito:** merge `tech-lead` → head, IA, push, merge API (`/worker/pr-resolution/*`).
 
 **Billing (por chamada e por rodada):** cada invocação do Cursor CLI regista timestamp local; ao fim de cada rodada (escopo fase 1 / fases 2–3 / onda micro 4–6, ou pipeline de uma task) o orquestrador consulta a Admin API e faz **match** dos eventos por timestamp mais próximo (com cluster para vários eventos na mesma chamada). O CB do job é a **soma das rodadas** em `data/tenants/<id>/billing-sessions/<jobId>.jsonl`. Sem sessão de rodadas, o worker usa fallback na janela do job (`[início−2min, fim+1min]`).
 
@@ -77,7 +100,7 @@ cd ../ai-factory-back
 npm run pull-tenant-env -- <tenant-uuid>
 ```
 
-Cria `ai-factory-cli/data/tenants/<uuid>/.env` com `TENANT_ID`, `BACK_URL`, `WORKER_SECRET`, `REDIS_URL` e `CURSOR_ADMIN_API_KEY` (se existir na BD). A API key de execução vem por job no claim.
+Cria `ai-factory-cli/data/tenants/<uuid>/.env` com `TENANT_ID`, `BACK_URL`, `WORKER_SECRET`, `REDIS_URL` e `CURSOR_ADMIN_API_KEY` (se existir na BD). Email e API key de cada **bot** (slot) vêm no claim — não no `.env`.
 
 ### 2. Build da imagem
 

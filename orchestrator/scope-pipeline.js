@@ -563,7 +563,20 @@ Regras:
 log.phase("Sincronizando ondas de entrega");
 syncTaskDeliveryFlags({ microPath: microFile, backlogPath: backlogFile, project, macroId });
 const microsForTarget = readMicrosFromPath(microFile);
-const targetMicro = getOpenMicro(microsForTarget);
+const forcedMicroId = String(process.env.AI_FACTORY_TARGET_MICRO_ID || "").trim();
+let targetMicro = null;
+if (forcedMicroId) {
+  targetMicro = microsForTarget.find((m) => m.id === forcedMicroId) ?? null;
+  if (!targetMicro) {
+    console.error(
+      `Micro alvo "${forcedMicroId}" não encontrado em ${microFile}. Micros disponíveis: ${microsForTarget.map((m) => m.id).join(", ") || "(nenhum)"}`
+    );
+    process.exit(1);
+  }
+  log.info("Micro alvo (job payload)", { microId: forcedMicroId });
+} else {
+  targetMicro = getOpenMicro(microsForTarget);
+}
 
 if (!targetMicro) {
   console.log(

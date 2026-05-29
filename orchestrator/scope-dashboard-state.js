@@ -45,6 +45,23 @@ function toPosix(abs) {
 }
 
 /**
+ * @param {string} macroAbs
+ */
+function readMacroScopeBody(macroAbs) {
+  if (!fs.existsSync(macroAbs)) return "";
+  const raw = fs.readFileSync(macroAbs, "utf-8").replace(/^\uFEFF/, "");
+  const lines = raw.split(/\r?\n/);
+  let bodyStart = 0;
+  if (lines[0]?.startsWith("# ")) {
+    bodyStart = 1;
+    while (bodyStart < lines.length && lines[bodyStart].trim() === "") {
+      bodyStart += 1;
+    }
+  }
+  return lines.slice(bodyStart).join("\n").trim();
+}
+
+/**
  * @param {object[]} tasks
  */
 function backlogDevInProgress(tasks) {
@@ -194,9 +211,13 @@ export function getScopeDashboardState(project, opts = {}) {
     scopeSteps[3].state = "active";
   }
 
+  const macroScopeMd = macroExists ? readMacroScopeBody(macroAbs) : "";
+
   return {
     project,
     macroId,
+    macroScopeMd,
+    macroEditable: micros.length === 0,
     paths: {
       macro: toPosix(macroAbs),
       micro: toPosix(microAbs),
