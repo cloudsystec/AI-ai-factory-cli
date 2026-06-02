@@ -109,7 +109,7 @@ export function getScopeDashboardState(project, opts = {}) {
     tasks.every((t) => {
       const rt = runtimeStateById.get(t.id);
       const st = rt?.status || t.status;
-      return st === "done" && !rt?.blockReason;
+      return st === "done" && !rt?.blockReason && !rt?.failedStep;
     });
 
   const projectCompleted =
