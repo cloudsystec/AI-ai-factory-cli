@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { cursorAgentArgv, cursorCommand } from "./cursor-agent-cli.js";
 import {
   recordAiCallStart,
@@ -62,18 +62,38 @@ export function runCursorAgent(opts) {
     file: agentFile,
     timeoutMs: AGENT_TIMEOUT_MS,
     promptLen: prompt.length,
+    argv: cursorAgentArgv().join(" "),
   });
   const startMs = Date.now();
 
+  if (!String(process.env.CURSOR_API_KEY || "").trim()) {
+    throw new Error(
+      "CURSOR_API_KEY ausente — configure a API key do bot executor no admin"
+    );
+  }
+
   try {
-    execFileSync(cursorCommand(), cursorAgentArgv(), {
+    const result = spawnSync(cursorCommand(), cursorAgentArgv(), {
       input: prompt,
-      stdio: ["pipe", "inherit", "inherit"],
       cwd: process.cwd(),
-      shell: true,
       env: process.env,
+      shell: true,
       timeout: AGENT_TIMEOUT_MS,
+      encoding: "utf-8",
+      maxBuffer: 20 * 1024 * 1024,
     });
+
+    if (result.error) {
+      throw result.error;
+    }
+    if (result.status !== 0) {
+      const stderr = String(result.stderr || "").trim();
+      const stdout = String(result.stdout || "").trim();
+      const detail = stderr || stdout || "(sem saída do agent)";
+      throw new Error(
+        `agent exit ${result.status ?? "?"}: ${detail.slice(0, 400)}`
+      );
+    }
     const elapsedMs = Date.now() - startMs;
     log.debug(`Chamada IA concluída`, {
       agent: label,

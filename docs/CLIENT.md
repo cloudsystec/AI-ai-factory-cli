@@ -20,7 +20,7 @@ Este repositório é o **cliente** que corre na infraestrutura do tenant (ou do 
 | **Cursor Admin API** | `CURSOR_ADMIN_API_KEY` | Chave **Admin** do tenant (gravada no back, exportada por `pull-tenant-env`) — billing via Admin API |
 | **Cursor (execução)** | *(por job / slot)* | `CURSOR_API_KEY` do **bot** do slot — enviada no `POST /worker/claim`, não no `.env` |
 | **Billing** | `CURSOR_USAGE_EMAIL` | Email do **bot** que executou o job (match na Admin API) |
-| **Cursor CLI** | `CURSOR_AGENT` (opcional) | Default na imagem: `agent` |
+| **Cursor CLI** | `CURSOR_AGENT` (opcional) | Default na imagem: `agent` com `-p --trust --force` (headless) |
 | **Logs** | `AI_FACTORY_LOG_COLOR`, `AI_FACTORY_LOG_LEVEL` | Cores em `docker logs` (default `COLOR=1` na imagem) |
 
 Sem `REDIS_URL` o worker não arranca.

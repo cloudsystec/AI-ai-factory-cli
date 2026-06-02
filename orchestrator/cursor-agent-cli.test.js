@@ -16,13 +16,13 @@ describe("cursorAgentArgv", () => {
     process.env = prev;
   });
 
-  it("default inclui --trust", () => {
-    assert.deepEqual(cursorAgentArgv(), ["--trust"]);
+  it("default inclui -p, --force e --trust (headless Docker)", () => {
+    assert.deepEqual(cursorAgentArgv(), ["-p", "--force", "--trust"]);
   });
 
-  it("CURSOR_AGENT_TRUST=false desativa flags", () => {
+  it("CURSOR_AGENT_TRUST=false remove --trust mas mantém headless", () => {
     process.env.CURSOR_AGENT_TRUST = "false";
-    assert.deepEqual(cursorAgentArgv(), []);
+    assert.deepEqual(cursorAgentArgv(), ["-p", "--force"]);
   });
 
   it("CURSOR_AGENT_ARGS faz override", () => {

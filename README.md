@@ -23,7 +23,7 @@ Regras dos agentes no volume: [AGENTS.md](AGENTS.md).
 docker build -t ai-factory-cli .
 ```
 
-A imagem inclui o **Cursor CLI** (`agent`). Override: `CURSOR_AGENT`.
+A imagem inclui o **Cursor CLI** (`agent`) em modo headless (`-p --trust --force`). Override: `CURSOR_AGENT` / `CURSOR_AGENT_ARGS`.
 
 ## Arranque do worker
 

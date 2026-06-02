@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV PATH="/root/.local/bin:${PATH}"
 ENV CURSOR_AGENT=agent
 ENV CURSOR_AGENT_TRUST=1
+ENV CURSOR_AGENT_ARGS="-p --trust --force"
 ENV AI_FACTORY_CLI_ROOT=/app
 ENV NODE_ENV=production
 ENV AI_FACTORY_LOG_COLOR=1
