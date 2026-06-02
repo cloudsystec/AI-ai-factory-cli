@@ -36,7 +36,6 @@ const {
   dispatchTick,
   ensureGitProvision,
   fetchActiveProjects,
-  updateJobBilling,
 } = await import("./back-client.js");
 const {
   appendJobLogLine,
@@ -46,10 +45,11 @@ const {
 const { runJobLocally } = await import("./run-job.js");
 const { reportProjectDashboard } = await import("./report-dashboard.js");
 const { syncProjectAgentsToDisk } = await import("./sync-project-agents.js");
-const { resolveJobCostBaseUsd } = await import("./resolve-job-cost.js");
 const {
-  readJobBillingTotal,
   clearBillingSession,
+  reconcileJobBilling,
+  flushPendingSettlements,
+  describeBillingSession,
 } = await import("./ai-call-billing.js");
 const { createLogger, redactForClient } = await import("./logger.js");
 
@@ -131,74 +131,40 @@ async function syncAgentsForProject(projectSlug) {
   log.info("Agentes sincronizados", { project: projectSlug, files: n });
 }
 
-const BILLING_SETTLE_DELAY_MS = Number(process.env.BILLING_SETTLE_DELAY_MS || 20_000);
-
 /**
  * @param {string} jobId
  * @param {{ status: string, exitCode?: number, startedMs: number, finishedMs: number, billingEmail?: string }} opts
  */
 async function finishJobWithBilling(jobId, opts) {
-  const sessionTotals = readJobBillingTotal(jobId);
+  const session = describeBillingSession(jobId);
+  log.info("Finalizando billing do job (worker)", {
+    jobId,
+    pid: process.pid,
+    billingEmail: opts.billingEmail || "(ausente)",
+    ...session,
+  });
 
-  if (sessionTotals.callCount > 0) {
-    await completeJob(jobId, {
-      status: opts.status,
-      exitCode: opts.exitCode,
-      costBaseUsd: sessionTotals.totalCostBaseUsd,
-    });
-    log.debug("Billing registado (round_settlement)", {
-      jobId,
-      costBaseUsd: sessionTotals.totalCostBaseUsd.toFixed(4),
-    });
-    return;
-  }
+  await flushPendingSettlements();
+
+  const reconciled = await reconcileJobBilling(jobId, {
+    startedMs: opts.startedMs,
+    finishedMs: opts.finishedMs,
+    email: opts.billingEmail || undefined,
+  });
 
   await completeJob(jobId, {
     status: opts.status,
     exitCode: opts.exitCode,
-    costBaseUsd: 0,
+    costBaseUsd: reconciled.totalCostBaseUsd,
+    chargeSource: reconciled.chargeSource,
   });
 
-  settleBillingInBackground(jobId, opts);
-}
-
-/**
- * Aguarda o delay e depois resolve o custo real via Cursor Admin API,
- * atualizando apenas o billing do job sem bloquear o worker.
- */
-function settleBillingInBackground(jobId, opts) {
-  log.debug("Billing background agendado", { jobId, delayMs: BILLING_SETTLE_DELAY_MS });
-  setTimeout(async () => {
-    log.debug("Billing background: iniciando resolução", { jobId });
-    const resolveStart = Date.now();
-    try {
-      const billing = await resolveJobCostBaseUsd({
-        startedMs: opts.startedMs,
-        finishedMs: opts.finishedMs,
-        email: opts.billingEmail,
-      });
-      const resolveMs = Date.now() - resolveStart;
-      if (billing.costBaseUsd > 0) {
-        await updateJobBilling(jobId, {
-          costBaseUsd: billing.costBaseUsd,
-        });
-        log.info("Billing atualizado (background)", {
-          jobId,
-          costBaseUsd: billing.costBaseUsd.toFixed(4),
-          source: billing.source,
-          resolveMs,
-        });
-      } else {
-        log.debug("Billing background: custo zero, sem atualização", { jobId, source: billing.source, resolveMs });
-      }
-    } catch (e) {
-      log.warn("Billing background falhou", {
-        jobId,
-        error: e instanceof Error ? e.message : String(e),
-        resolveMs: Date.now() - resolveStart,
-      });
-    }
-  }, BILLING_SETTLE_DELAY_MS);
+  log.info("Billing registado (summary BD + completeJob)", {
+    jobId,
+    costBaseUsd: reconciled.totalCostBaseUsd.toFixed(4),
+    calls: reconciled.callCount,
+    chargeSource: reconciled.chargeSource,
+  });
 }
 
 /**
@@ -237,7 +203,13 @@ async function processOneJob(job, ctx) {
     }
 
     await resetJobLog(job.id);
-    clearBillingSession(job.id);
+    const clearedPath = clearBillingSession(job.id);
+    if (clearedPath) {
+      log.info("Sessão billing anterior removida", {
+        jobId: job.id,
+        path: clearedPath,
+      });
+    }
     await appendJobLogLine(
       job.id,
       `Worker ${workerId} (slot ${slot}) iniciou job ${job.kind}`

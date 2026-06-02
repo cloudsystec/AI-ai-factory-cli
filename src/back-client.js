@@ -31,14 +31,20 @@ export async function backFetch(path, init = {}) {
 
   const method = init.method || "GET";
   const startMs = Date.now();
+  const isBilling =
+    path.includes("/billing/calls") || path.includes("/billing/reconcile");
   const silent =
-    path === "/worker/claim"
+    !isBilling
+    && (path === "/worker/claim"
     || path === "/worker/heartbeat"
     || path === "/worker/runtime-sync"
     || path === "/worker/pr-resolution/claim"
     || path === "/worker/dispatch-tick"
-    || path.startsWith("/worker/active-projects");
-  if (!silent) log.debug(`→ ${method} ${path}`);
+    || path.startsWith("/worker/active-projects"));
+  if (!silent) {
+    const logFn = isBilling ? log.info.bind(log) : log.debug.bind(log);
+    logFn(`→ ${method} ${path}`);
+  }
 
   let lastErr;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
@@ -49,7 +55,10 @@ export async function backFetch(path, init = {}) {
         throw new Error(`BACK ${res.status}: ${body}`);
       }
       const elapsedMs = Date.now() - startMs;
-      if (!silent) log.debug(`← ${method} ${path}`, { status: res.status, elapsedMs });
+      if (!silent) {
+        const logFn = isBilling ? log.info.bind(log) : log.debug.bind(log);
+        logFn(`← ${method} ${path}`, { status: res.status, elapsedMs });
+      }
       return res;
     } catch (err) {
       lastErr = err;
@@ -60,7 +69,13 @@ export async function backFetch(path, init = {}) {
         continue;
       }
       const elapsedMs = Date.now() - startMs;
-      if (!silent) log.debug(`← ${method} ${path} FALHOU`, { elapsedMs, error: err.message?.slice(0, 100) });
+      if (!silent) {
+        const logFn = isBilling ? log.warn.bind(log) : log.debug.bind(log);
+        logFn(`← ${method} ${path} FALHOU`, {
+          elapsedMs,
+          error: err.message?.slice(0, 200),
+        });
+      }
       throw err;
     }
   }
@@ -123,7 +138,7 @@ export async function postLog(jobId, line) {
 
 /**
  * @param {string} jobId
- * @param {{ status: string, costBaseUsd?: number, exitCode?: number }} payload
+ * @param {{ status: string, costBaseUsd?: number, exitCode?: number, chargeSource?: string }} payload
  */
 export async function completeJob(jobId, payload) {
   await backFetch(`/worker/jobs/${jobId}/complete`, {
@@ -134,11 +149,85 @@ export async function completeJob(jobId, payload) {
 
 /**
  * @param {string} jobId
- * @param {{ costBaseUsd: number }} payload
+ * @param {{ costBaseUsd: number, chargeSource?: string }} payload
  */
 export async function updateJobBilling(jobId, payload) {
   await backFetch(`/worker/jobs/${jobId}/billing`, {
     method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+/**
+ * @param {string} jobId
+ * @param {{ callId: string, agentFile?: string, agentName?: string, startedAtMs: number, meta?: object }} payload
+ */
+export async function registerBillingCall(jobId, payload) {
+  await backFetch(`/worker/jobs/${jobId}/billing/calls`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+/**
+ * @param {string} jobId
+ * @param {string} callId
+ * @param {object} payload
+ */
+export async function settleBillingCall(jobId, callId, payload) {
+  await backFetch(
+    `/worker/jobs/${encodeURIComponent(jobId)}/billing/calls/${encodeURIComponent(callId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }
+  );
+}
+
+/**
+ * @param {string} jobId
+ * @param {string} callId
+ * @param {{ endedAtMs: number, botEmail?: string }} payload
+ */
+export async function endBillingCall(jobId, callId, payload) {
+  await backFetch(
+    `/worker/jobs/${encodeURIComponent(jobId)}/billing/calls/${encodeURIComponent(callId)}/end`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }
+  );
+}
+
+/**
+ * @param {string} jobId
+ * @returns {Promise<{ totalCostBaseUsd: number, chargeSource: string, callCount: number, openCount: number }>}
+ */
+export async function getJobBillingSummary(jobId) {
+  const res = await backFetch(`/worker/jobs/${encodeURIComponent(jobId)}/billing/summary`);
+  return res.json();
+}
+
+/**
+ * @param {{ botEmail: string, sinceMs: number, untilMs: number }} query
+ */
+export async function fetchConsumedBillingKeys(query) {
+  const params = new URLSearchParams({
+    botEmail: query.botEmail,
+    sinceMs: String(query.sinceMs),
+    untilMs: String(query.untilMs),
+  });
+  const res = await backFetch(`/worker/billing/consumed-keys?${params}`);
+  return res.json();
+}
+
+/**
+ * @param {string} jobId
+ * @param {object} payload
+ */
+export async function reconcileBillingJob(jobId, payload) {
+  await backFetch(`/worker/jobs/${jobId}/billing/reconcile`, {
+    method: "POST",
     body: JSON.stringify(payload),
   });
 }

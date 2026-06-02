@@ -106,11 +106,46 @@ export async function fetchAllFilteredUsageEvents(opts) {
 }
 
 /**
+ * Campo `chargedCents` da Cursor Admin API: centavos de USD (ex.: 66.12 = US$ 0.6612).
+ * @param {number|string|null|undefined} raw
+ * @returns {number}
+ */
+export function cursorChargedFieldToCostBaseUsd(raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.round((n / 100) * 1_000_000) / 1_000_000;
+}
+
+/** Centavos inteiros para soma/agregação (arredonda o valor da API). */
+export function normalizeCursorChargeToCents(raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.round(n);
+}
+
+/**
  * @param {object} ev
  */
 export function eventTimestampMs(ev) {
   const ts = Number(ev?.timestamp);
   return Number.isFinite(ts) ? ts : NaN;
+}
+
+/**
+ * Chave estável para deduplicar eventos Cursor entre chamadas/jobs.
+ * @param {object} ev
+ */
+export function cursorEventKey(ev) {
+  if (ev?.id != null && String(ev.id).trim()) return String(ev.id);
+  if (ev?.eventId != null && String(ev.eventId).trim()) return String(ev.eventId);
+  const ts = eventTimestampMs(ev);
+  return [
+    ts,
+    ev.chargedCents ?? 0,
+    ev.userEmail ?? "",
+    ev.model ?? ev.modelName ?? "",
+    ev.isHeadless ? 1 : 0,
+  ].join("|");
 }
 
 /**
@@ -126,6 +161,7 @@ export function eventTimestampMs(ev) {
 export function sumChargedUsdInWindow(events, filter) {
   const { startMs, endMs, email, headlessOnly } = filter;
   let cents = 0;
+  let costBaseUsd = 0;
   let matched = 0;
   let tokensIn = 0;
   let tokensOut = 0;
@@ -137,7 +173,8 @@ export function sumChargedUsdInWindow(events, filter) {
     if (headlessOnly && ev.isHeadless !== true) continue;
     if (ev.isChargeable === false) continue;
 
-    cents += Number(ev.chargedCents) || 0;
+    cents += normalizeCursorChargeToCents(ev.chargedCents);
+    costBaseUsd += cursorChargedFieldToCostBaseUsd(ev.chargedCents);
     matched += 1;
     const tu = ev.tokenUsage;
     if (tu && typeof tu === "object") {
@@ -145,9 +182,8 @@ export function sumChargedUsdInWindow(events, filter) {
       tokensOut += Number(tu.outputTokens) || 0;
     }
   }
-
   return {
-    costBaseUsd: Math.round((cents / 100) * 1_000_000) / 1_000_000,
+    costBaseUsd: Math.round(costBaseUsd * 1_000_000) / 1_000_000,
     chargedCents: cents,
     eventCount: matched,
     tokensIn,

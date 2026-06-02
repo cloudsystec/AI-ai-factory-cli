@@ -40,6 +40,7 @@ export function runCursorAgent(opts) {
     agentName,
     skipped: skipAgents,
     meta,
+    prompt,
   });
 
   if (skipAgents) {

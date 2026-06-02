@@ -3,7 +3,23 @@ import assert from "node:assert/strict";
 import {
   eventTimestampMs,
   sumChargedUsdInWindow,
+  normalizeCursorChargeToCents,
+  cursorChargedFieldToCostBaseUsd,
 } from "./cursor-admin-api.js";
+
+test("cursorChargedFieldToCostBaseUsd: centavos de USD da API", () => {
+  assert.equal(cursorChargedFieldToCostBaseUsd(66.12), 0.6612);
+  assert.equal(cursorChargedFieldToCostBaseUsd(18.8993), 0.188993);
+  assert.equal(cursorChargedFieldToCostBaseUsd(0.15), 0.0015);
+  assert.equal(cursorChargedFieldToCostBaseUsd(10), 0.1);
+  assert.equal(cursorChargedFieldToCostBaseUsd(0), 0);
+});
+
+test("normalizeCursorChargeToCents", () => {
+  assert.equal(normalizeCursorChargeToCents(66.12), 66);
+  assert.equal(normalizeCursorChargeToCents(10), 10);
+  assert.equal(normalizeCursorChargeToCents(0), 0);
+});
 
 test("sumChargedUsdInWindow: soma chargedCents na janela", () => {
   const events = [

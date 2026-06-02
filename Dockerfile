@@ -18,7 +18,7 @@ ENV CURSOR_AGENT_TRUST=1
 ENV AI_FACTORY_CLI_ROOT=/app
 ENV NODE_ENV=production
 ENV AI_FACTORY_LOG_COLOR=1
-ENV AI_FACTORY_LOG_LEVEL=debug
+ENV AI_FACTORY_LOG_LEVEL=info
 
 COPY package.json ./
 RUN npm install --omit=dev
@@ -31,6 +31,7 @@ COPY src/ ./src/
 RUN test -f /app/orchestrator/run-task.js
 
 COPY docker-entrypoint.sh /docker-entrypoint.sh
-RUN chmod +x /docker-entrypoint.sh
+# Windows pode gravar CRLF; shebang quebra com "no such file or directory"
+RUN sed -i 's/\r$//' /docker-entrypoint.sh && chmod +x /docker-entrypoint.sh
 
 ENTRYPOINT ["/docker-entrypoint.sh"]

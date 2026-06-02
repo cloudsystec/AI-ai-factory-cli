@@ -26,6 +26,78 @@ function branchExistsOnRemote(cwd, branch) {
   }
 }
 
+/**
+ * @param {string} porcelain saída de `git worktree list --porcelain`
+ */
+function parseWorktreeList(porcelain) {
+  /** @type {{ path: string, branch: string|null }[]} */
+  const worktrees = [];
+  let current = null;
+  for (const line of porcelain.split("\n")) {
+    if (line.startsWith("worktree ")) {
+      if (current) worktrees.push(current);
+      current = { path: line.slice(9).trim(), branch: null };
+    } else if (current && line.startsWith("branch ")) {
+      current.branch = line.slice(7).trim();
+    }
+  }
+  if (current) worktrees.push(current);
+  return worktrees;
+}
+
+/**
+ * Remove registo de worktree quando a pasta foi apagada mas o Git ainda associa a branch ao path.
+ * @param {string} cacheDir
+ * @param {string} codeDir
+ * @param {string} branch
+ * @param {(line: string) => void} onLine
+ */
+function removeTaskWorktreeIfRegistered(cacheDir, codeDir, branch, onLine) {
+  const normalizedCode = path.resolve(codeDir);
+  const branchRef = `refs/heads/${branch}`;
+  let removed = false;
+
+  try {
+    const porcelain = gitExec(["worktree", "list", "--porcelain"], { cwd: cacheDir });
+    for (const wt of parseWorktreeList(porcelain)) {
+      const wtPath = path.resolve(wt.path);
+      if (wtPath !== normalizedCode && wt.branch !== branchRef) continue;
+      onLine(`[git] remover worktree registado (${wt.branch || wt.path})…\n`);
+      try {
+        gitExec(["worktree", "remove", "--force", wt.path], { cwd: cacheDir });
+        removed = true;
+      } catch (e) {
+        onLine(`[git] worktree remove warn: ${e.message}\n`);
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+
+  if (!removed) {
+    try {
+      gitExec(["worktree", "prune"], { cwd: cacheDir });
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+/**
+ * @param {string[]} addArgs argumentos após `worktree add`
+ */
+function worktreeAddWithRecovery(cacheDir, codeDir, branch, addArgs, onLine) {
+  try {
+    gitExec(["worktree", "add", ...addArgs], { cwd: cacheDir });
+  } catch (e) {
+    const msg = String(e?.message || e);
+    if (!/already checked out/i.test(msg)) throw e;
+    onLine(`[git] worktree em conflito — limpar registo e repetir…\n`);
+    removeTaskWorktreeIfRegistered(cacheDir, codeDir, branch, onLine);
+    gitExec(["worktree", "add", ...addArgs], { cwd: cacheDir });
+  }
+}
+
 function findFallbackRemoteBranch(cwd) {
   try {
     const out = gitExec(["branch", "-r"], { cwd });
@@ -56,11 +128,14 @@ export function ensureTaskWorkspace(project, taskId, opts = {}, onLine = () => {
     throw new Error(`Git cache ausente em ${cacheDir}. Execute provision primeiro.`);
   }
 
-  if (opts.forceRecreate && fs.existsSync(codeDir)) {
-    try {
-      gitExec(["worktree", "remove", "--force", codeDir], { cwd: cacheDir });
-    } catch {
-      fs.rmSync(path.join(ws, "tasks", taskId), { recursive: true, force: true });
+  if (opts.forceRecreate) {
+    removeTaskWorktreeIfRegistered(cacheDir, codeDir, branch, onLine);
+    if (fs.existsSync(path.join(ws, "tasks", taskId))) {
+      try {
+        fs.rmSync(path.join(ws, "tasks", taskId), { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
     }
   }
 
@@ -131,12 +206,17 @@ export function ensureTaskWorkspace(project, taskId, opts = {}, onLine = () => {
   const remoteBranchExists = branchExistsOnRemote(cacheDir, branch);
 
   if (!fs.existsSync(codeDir)) {
+    removeTaskWorktreeIfRegistered(cacheDir, codeDir, branch, onLine);
     fs.mkdirSync(path.dirname(codeDir), { recursive: true });
     if (remoteBranchExists) {
       onLine(`[git] worktree ${branch} (remote existe)…\n`);
-      gitExec(["worktree", "add", "-B", branch, codeDir, `origin/${branch}`], {
-        cwd: cacheDir,
-      });
+      worktreeAddWithRecovery(
+        cacheDir,
+        codeDir,
+        branch,
+        ["-B", branch, codeDir, `origin/${branch}`],
+        onLine
+      );
       onLine(`[git] merge origin/${techLead} na task branch…\n`);
       try {
         gitExec(["merge", `origin/${techLead}`, "--no-edit"], { cwd: codeDir });
@@ -146,9 +226,13 @@ export function ensureTaskWorkspace(project, taskId, opts = {}, onLine = () => {
       }
     } else {
       onLine(`[git] worktree ${branch} from origin/${techLead}…\n`);
-      gitExec(["worktree", "add", "-B", branch, codeDir, `origin/${techLead}`], {
-        cwd: cacheDir,
-      });
+      worktreeAddWithRecovery(
+        cacheDir,
+        codeDir,
+        branch,
+        ["-B", branch, codeDir, `origin/${techLead}`],
+        onLine
+      );
     }
   } else {
     onLine(`[git] worktree existente em ${codeDir}\n`);

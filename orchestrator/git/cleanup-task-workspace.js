@@ -15,12 +15,18 @@ export function cleanupTaskWorkspace(project, taskId, onLine = () => {}) {
   const codeDir = taskCodeDir(project, taskId);
   const taskDir = path.join(ws, "tasks", taskId);
 
-  if (fs.existsSync(codeDir) && fs.existsSync(cacheDir)) {
+  if (fs.existsSync(cacheDir)) {
     try {
       gitExec(["worktree", "remove", "--force", codeDir], { cwd: cacheDir });
       onLine(`[git] worktree removido\n`);
     } catch (e) {
       onLine(`[git] worktree remove warn: ${e.message}\n`);
+      try {
+        gitExec(["worktree", "prune"], { cwd: cacheDir });
+        onLine(`[git] worktree prune\n`);
+      } catch {
+        /* ignore */
+      }
     }
   }
 
