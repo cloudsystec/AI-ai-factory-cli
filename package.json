@@ -7,7 +7,7 @@
     "scope": "node orchestrator/scope-pipeline.js",
     "develop": "node orchestrator/develop-next.js",
     "task": "node orchestrator/run-task.js",
-    "test": "node --test orchestrator/*.test.js orchestrator/agent-roles.test.js orchestrator/project-paths-tenant.test.js orchestrator/cursor-agent-cli.test.js orchestrator/micro-parse.test.js src/cursor-admin-api.test.js src/ai-call-billing.test.js",
+    "test": "node --test orchestrator/*.test.js orchestrator/agent-roles.test.js orchestrator/project-paths-tenant.test.js orchestrator/cursor-agent-cli.test.js orchestrator/micro-parse.test.js src/cursor-admin-api.test.js src/ai-call-billing.test.js src/error-recovery.test.js",
     "usage:cursor": "node scripts/fetch-cursor-usage.js"
   },
   "dependencies": {

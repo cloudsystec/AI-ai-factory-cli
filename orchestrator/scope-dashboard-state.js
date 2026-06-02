@@ -96,9 +96,25 @@ export function getScopeDashboardState(project, opts = {}) {
   const microPoDone =
     micros.length > 0 && pendingPo === 0 && approvedMicros.length > 0;
 
-  const { openMicro, deliveryStatusById } = computeWaveDeliveryFromData(micros, tasks);
+  const { openMicro, deliveryStatusById } = computeWaveDeliveryFromData(
+    micros,
+    tasks,
+    runtimeStateById
+  );
 
   const wavesCompleteScenario = microPoDone && !openMicro;
+
+  const allTasksSuccessful =
+    tasks.length > 0 &&
+    tasks.every((t) => {
+      const rt = runtimeStateById.get(t.id);
+      const st = rt?.status || t.status;
+      return st === "done" && !rt?.blockReason;
+    });
+
+  const projectCompleted =
+    Boolean(opts.projectCompleted) ||
+    (wavesCompleteScenario && allTasksSuccessful);
 
   const subsetOpen = openMicro
     ? tasks.filter((t) => t.sourceMicroId === openMicro.id)
@@ -135,6 +151,10 @@ export function getScopeDashboardState(project, opts = {}) {
       pendingPo > 0
         ? `${pendingPo} micro(s) sem validationStatus approved`
         : "Nenhum micro aprovado pelo PO";
+  } else if (projectCompleted) {
+    currentKey = "project_completed";
+    currentLabel = "Projeto concluído — todas as micros e tasks executadas";
+    hint = "Execução desactivada. Consulte o resumo de finalização.";
   } else if (wavesCompleteScenario) {
     currentKey = "waves_done";
     currentLabel = "Ondas de escopo concluídas (nenhum micro open)";
@@ -186,12 +206,17 @@ export function getScopeDashboardState(project, opts = {}) {
     scopeSteps[1].state = "done";
   }
 
-  if (!microPoDone) {
+  if (projectCompleted) {
+    scopeSteps[0].state = "done";
+    scopeSteps[1].state = "done";
+    scopeSteps[2].state = "done";
+    scopeSteps[3].state = "done";
+  } else if (!microPoDone) {
     scopeSteps[2].state = "pending";
     scopeSteps[3].state = "pending";
   } else if (wavesCompleteScenario) {
     scopeSteps[2].state = "done";
-    scopeSteps[3].state = "pending";
+    scopeSteps[3].state = "done";
   } else if (openMicro && (subsetOpen.length === 0 || pendingTl > 0 || allOpenDone)) {
     scopeSteps[2].state = "active";
     scopeSteps[3].state = "pending";
@@ -204,7 +229,7 @@ export function getScopeDashboardState(project, opts = {}) {
     scopeSteps[3].state = "pending";
   }
 
-  if (devRunning) {
+  if (!projectCompleted && devRunning) {
     scopeSteps[0].state = "done";
     scopeSteps[1].state = "done";
     scopeSteps[2].state = "done";
@@ -273,7 +298,9 @@ export function getScopeDashboardState(project, opts = {}) {
       hint,
     },
     scopeSteps,
-    devPipelineActive: devRunning,
+    devPipelineActive: projectCompleted ? false : devRunning,
     wavesCompleteScenario,
+    projectCompleted,
+    allTasksSuccessful,
   };
 }

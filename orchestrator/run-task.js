@@ -4,15 +4,18 @@ import path from "node:path";
 import {
     backlogFile,
     isValidProjectSlug,
+    microScopeFile,
     npmTestPrefix,
     repoRelativePosix,
     taskStateFile,
     workspaceRoot,
 } from "./project-paths.js";
-import { readBacklogFile } from "./backlog-io.js";
+import { readBacklogFile, writeBacklogFile } from "./backlog-io.js";
 import { clearQaVerdict, readQaVerdict, qaVerdictFile } from "./qa-verdict.js";
 import { readAgentFile, readGlobalRules, systemSecurityRules } from "./agent-prompts.js";
 import { runCursorAgent } from "./cursor-agent-runner.js";
+import { runWithErrorRecovery } from "./error-recovery.js";
+import { syncTaskDeliveryFlags } from "./micro-delivery.js";
 import {
     flushPendingSettlements,
     installBillingSignalHandlers,
@@ -55,6 +58,8 @@ if (!fs.existsSync(backlogPath)) {
 }
 
 const backlogDoc = readBacklogFile(backlogPath, { project });
+const macroId = backlogDoc.macroId || project;
+const microPath = microScopeFile(project, macroId);
 const task = backlogDoc.tasks.find((t) => t.id === taskId);
 
 if (!task) {
@@ -85,6 +90,26 @@ function maxStep(a, b) {
     return ia >= ib ? a : b;
 }
 
+function updateBacklogTaskStatus(status) {
+    const doc = readBacklogFile(backlogPath, { project, macroId });
+    const index = doc.tasks.findIndex((t) => t.id === task.id);
+    if (index < 0) return;
+    doc.tasks[index].status = status;
+    doc.tasks[index].updatedAt = new Date().toISOString();
+    writeBacklogFile(backlogPath, {
+        ...doc,
+        updatedAt: new Date().toISOString(),
+    });
+}
+
+function syncMicroDeliveryAfterDone() {
+    try {
+        syncTaskDeliveryFlags({ microPath, backlogPath, project, macroId });
+    } catch (e) {
+        log.warn("syncTaskDeliveryFlags após done", { error: e.message });
+    }
+}
+
 function updateTaskState(status, currentAgent, extra = {}) {
     const state = loadState();
     const index = state.findIndex((t) => t.id === task.id);
@@ -111,6 +136,11 @@ function updateTaskState(status, currentAgent, extra = {}) {
     }
 
     saveState(state);
+
+    if (status === "done") {
+        updateBacklogTaskStatus("done");
+        syncMicroDeliveryAfterDone();
+    }
 }
 
 function getTaskState() {
@@ -145,6 +175,7 @@ function classifyError(error) {
     if (msg.includes("workspace ausente")) return "infra";
     if (msg.includes("stale info") || msg.includes("rejected")) return "infra";
     if (msg.includes("authentication failed")) return "infra";
+    if (msg.includes("etimedout") || msg.includes("spawnsync")) return "agent";
     return "agent";
 }
 
@@ -301,13 +332,24 @@ ${systemSecurityRules()}
     console.log(`\n=== Rodando ${agentName} ===\n`);
 
     const agentStartMs = Date.now();
-    runCursorAgent({
-        agentFile: roleFile,
-        agentName,
-        prompt,
-        skipAgents: shouldSkipAgents(),
-        meta: { project, task: task.id, ...meta },
-    });
+    runWithErrorRecovery(
+        () =>
+            runCursorAgent({
+                agentFile: roleFile,
+                agentName,
+                prompt,
+                skipAgents: shouldSkipAgents(),
+                meta: { project, task: task.id, ...meta },
+            }),
+        {
+            roleFile,
+            agentName,
+            task,
+            project,
+            step: meta.step,
+            reportRootPrompt,
+        }
+    );
     const agentElapsedMs = Date.now() - agentStartMs;
     log.debug(`Agente finalizado`, {
         agent: agentName,

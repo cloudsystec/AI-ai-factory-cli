@@ -55,13 +55,27 @@ export function sortApprovedMicros(micros) {
 }
 
 /**
+ * @param {object} task
+ * @param {Map<string, object>|null|undefined} runtimeById
+ */
+function effectiveTaskStatus(task, runtimeById) {
+  const rt = runtimeById?.get(task.id);
+  if (rt?.status === "done" || task.status === "done") return "done";
+  return rt?.status || task.status || "todo";
+}
+
+/**
  * Micro com todas as tasks em done (se não houver tasks, ainda não está "fechado" para onda).
  * @param {string} microId
  * @param {object[]} tasks
+ * @param {Map<string, object>|null|undefined} [runtimeById]
  */
-export function isMicroDevClosed(microId, tasks) {
+export function isMicroDevClosed(microId, tasks, runtimeById = null) {
   const subset = tasks.filter((t) => t.sourceMicroId === microId);
   if (subset.length === 0) return false;
+  if (runtimeById) {
+    return subset.every((t) => effectiveTaskStatus(t, runtimeById) === "done");
+  }
   return subset.every((t) => t.status === "done");
 }
 
@@ -69,15 +83,16 @@ export function isMicroDevClosed(microId, tasks) {
  * Calcula onda atual (open/locked/closed) a partir de micros + tasks, **sem gravar** ficheiros.
  * @param {object[]} micros
  * @param {object[]} tasks
+ * @param {Map<string, object>|null|undefined} [runtimeById]
  * @returns {{ openMicro: object|undefined, deliveryStatusById: Map<string, string>, approvedSorted: object[] }}
  */
-export function computeWaveDeliveryFromData(micros, tasks) {
+export function computeWaveDeliveryFromData(micros, tasks, runtimeById = null) {
   const sorted = sortApprovedMicros(micros);
   const deliveryStatusById = new Map();
   let assignedOpen = false;
 
   for (const m of sorted) {
-    const closed = isMicroDevClosed(m.id, tasks);
+    const closed = isMicroDevClosed(m.id, tasks, runtimeById);
     if (closed) {
       deliveryStatusById.set(m.id, "closed");
     } else if (!assignedOpen) {
