@@ -56,6 +56,7 @@ const { createLogger, redactForClient } = await import("./logger.js");
 const log = createLogger("worker");
 const TENANT_PREFIX = TENANT_ID.slice(0, 8);
 const POLL_MS = Number(process.env.CLAIM_POLL_MS || 1000);
+const IDLE_POLL_MS = Number(process.env.IDLE_CLAIM_POLL_MS || 5000);
 const DASHBOARD_SYNC_MS = Number(process.env.DASHBOARD_SYNC_MS || 5000);
 const BOTS_READY_REFRESH_MS = Number(
   process.env.BOTS_READY_REFRESH_MS || 300_000
@@ -451,25 +452,20 @@ async function tryClaimProvision(slot, workerId) {
 }
 
 async function loopForSlot(slot) {
-  if (runningBySlot.get(slot)) return;
+  if (runningBySlot.get(slot)) return POLL_MS;
   const workerId = workerIdForSlot(slot);
 
   const inPlay = await slotHasPlay(slot);
 
   if (!inPlay) {
     const didProvision = await tryClaimProvision(slot, workerId);
-    if (didProvision) {
-      setImmediate(() => loopForSlot(slot));
-    }
-    return;
+    if (didProvision) return 0;
+    return IDLE_POLL_MS;
   }
 
   try {
     const prHandled = await tryResolveStuckPr(slot, workerId);
-    if (prHandled) {
-      setImmediate(() => loopForSlot(slot));
-      return;
-    }
+    if (prHandled) return 0;
 
     await dispatchTick(workerId).catch((e) =>
       log.warn("dispatch-tick falhou", { slot, error: e.message })
@@ -479,7 +475,7 @@ async function loopForSlot(slot) {
     let claimed = await claimJob(workerId);
     if (claimed.error === "bot_not_configured") {
       log.warn("Bot não configurado para slot", { slot });
-      return;
+      return IDLE_POLL_MS;
     }
     let job = claimed.job;
     if (!job) {
@@ -487,7 +483,7 @@ async function loopForSlot(slot) {
       claimed = await claimJob(workerId);
       job = claimed.job;
     }
-    if (!job) return;
+    if (!job) return POLL_MS;
     log.info("Job claimed", {
       slot,
       jobId: job.id,
@@ -509,6 +505,26 @@ async function loopForSlot(slot) {
   } catch (e) {
     log.error("Claim falhou", { slot, error: e.message });
   }
+  return POLL_MS;
+}
+
+/** Loop adaptativo: intervalo curto com ▶ Play, longo em pausa. */
+function startSlotLoop(slot) {
+  const tick = () => {
+    if (!activeSlots.includes(slot)) return;
+    loopForSlot(slot)
+      .then((delay) => {
+        if (!activeSlots.includes(slot)) return;
+        const ms = delay ?? POLL_MS;
+        if (ms <= 0) setImmediate(tick);
+        else setTimeout(tick, ms);
+      })
+      .catch(() => {
+        if (!activeSlots.includes(slot)) return;
+        setTimeout(tick, POLL_MS);
+      });
+  };
+  tick();
 }
 
 async function refreshActiveSlots() {
@@ -530,8 +546,7 @@ async function refreshActiveSlots() {
         log.warn("Register slot falhou", { slot, error: e.message })
       );
       runningBySlot.set(slot, false);
-      setInterval(() => loopForSlot(slot), POLL_MS);
-      loopForSlot(slot);
+      startSlotLoop(slot);
       log.info("Loop iniciado para slot", { slot, workerId });
     }
   }

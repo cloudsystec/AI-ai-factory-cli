@@ -15,7 +15,7 @@ Este repositório é o **cliente** que corre na infraestrutura do tenant (ou do 
 
 | Serviço | Variável | Notas |
 |---------|----------|--------|
-| **Backend** (API) | `BACK_URL` | URL publicada (ex. `http://host.docker.internal:4000` em dev Docker) |
+| **Backend** (API) | `BACK_URL` | Dev: `http://host.docker.internal:4000`. **Railway:** URL interna `http://…railway.internal:PORT` (via `WORKER_BACK_URL` no back). |
 | **Redis** (logs) | `REDIS_URL` | **Docker (worker):** `redis://host.docker.internal:6379` se Redis no PC; **N8N:** `redis://redis-stack:6379`. Não uses `127.0.0.1` dentro do container. |
 | **Cursor Admin API** | `CURSOR_ADMIN_API_KEY` | Chave **Admin** do tenant (gravada no back, exportada por `pull-tenant-env`) — billing via Admin API |
 | **Cursor (execução)** | *(por job / slot)* | `CURSOR_API_KEY` do **bot** do slot — enviada no `POST /worker/claim`, não no `.env` |
@@ -43,7 +43,7 @@ Variáveis: `AI_FACTORY_LOG_COLOR=1` (cores), `AI_FACTORY_LOG_LEVEL=info|debug|w
 - Locks: uma `task` por vez por `task_id`; `scope` / onda de micro são serializados por lock.
 - `GET /worker/bots-ready` no arranque; reconsulta a cada `BOTS_READY_REFRESH_MS` (default 5 min) se o admin configurar bots depois.
 - **Fonte da verdade dos bots = CLI:** `POST /worker/runtime-sync` no arranque (`startup: true`) e periodicamente (`RUNTIME_SYNC_MS`, default 15s). O CLI reporta `busy`/`jobId` por slot; o back reconcilia jobs presos e alinha o pool de execução (▶ no portal).
-- **Ordem do loop (por slot, só com ▶ Play no projecto):** (1) `POST /worker/pr-resolution/claim` se houver PR pendente/conflito; (2) `POST /worker/dispatch-tick` enfileira trabalho; (3) `POST /worker/claim` job; (4) se vazio, novo `dispatch-tick` + retry claim. Slot em ⏸ não faz nada (`GET /worker/active-projects`).
+- **Ordem do loop (por slot, só com ▶ Play no projecto):** (1) `POST /worker/pr-resolution/claim` se houver PR pendente/conflito; (2) `POST /worker/dispatch-tick` enfileira trabalho; (3) `POST /worker/claim` job; (4) se vazio, novo `dispatch-tick` + retry claim. Slot em ⏸ não faz dispatch/claim — só verifica provision Git (`CLAIM_POLL_MS` → `IDLE_CLAIM_POLL_MS`, default 5s).
 - **Paralelismo:** `agent_slots_in_use` conta só jobs `running`/`waiting_input` (não `queued`). Budget de tasks = `|bots Play|` − tasks a correr.
 - **Modos de dispatch (por projecto):**
 
