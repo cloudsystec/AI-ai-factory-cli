@@ -177,7 +177,9 @@ async function processOneJob(job, ctx) {
   const jobStartedMs = Date.now();
   const projectSlug =
     job.projectSlug ||
-    (job.kind === "provision" ? job.payload?.slug : null);
+    (job.kind === "provision" || job.kind === "git-migrate"
+      ? job.payload?.slug
+      : null);
 
   log.debug("Job processamento iniciado", {
     jobId: job.id,
@@ -426,10 +428,11 @@ async function tryClaimProvision(slot, workerId) {
     const claimed = await claimJob(workerId, { provisionOnly: true });
     if (claimed.error === "bot_not_configured") return false;
     const job = claimed.job;
-    if (!job || job.kind !== "provision") return false;
-    log.info("Provision claimed", {
+    if (!job || !["provision", "git-migrate"].includes(job.kind)) return false;
+    log.info("Infra Git claimed", {
       slot,
       jobId: job.id,
+      kind: job.kind,
       project: job.projectSlug,
     });
     runningBySlot.set(slot, true);

@@ -362,6 +362,13 @@ export async function notifyProvisionComplete(slug, body) {
   });
 }
 
+export async function notifyMigrateComplete(slug, body) {
+  await backFetch(`/worker/projects/${encodeURIComponent(slug)}/git/migrate-complete`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
 export async function putTaskDetail(slug, taskId, detail) {
   await backFetch(
     `/worker/projects/${encodeURIComponent(slug)}/tasks/${encodeURIComponent(taskId)}/detail`,

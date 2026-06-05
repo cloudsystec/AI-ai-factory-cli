@@ -25,6 +25,9 @@ export async function runJobLocally(job, onLine) {
   if (job.kind === "provision") {
     return runProvisionJob(job, onLine);
   }
+  if (job.kind === "git-migrate") {
+    return runGitMigrateJob(job, onLine);
+  }
 
   const project = job.projectSlug;
   const needsMacro = new Set([
@@ -200,6 +203,49 @@ async function runProvisionJob(job, onLine) {
     onLine(`Erro: ${e.message}\n`);
     try {
       await notifyProvisionComplete(slug, {
+        status: "failed",
+        error: e.message,
+      });
+    } catch {
+      /* ignore */
+    }
+    return { exitCode: 1, status: "failed" };
+  }
+}
+
+/**
+ * @param {object} job
+ * @param {(line: string) => void} onLine
+ */
+async function runGitMigrateJob(job, onLine) {
+  const { migrateToClientRepo } = await orchestratorImport(
+    "git/migrate-to-client-repo.js"
+  );
+  const { notifyMigrateComplete } = await import("./back-client.js");
+  const payload =
+    typeof job.payload === "string" ? JSON.parse(job.payload) : job.payload || {};
+  const slug = payload.slug || job.projectSlug;
+  onLine(`Migrando Git do projeto ${slug}…\n`);
+  try {
+    await migrateToClientRepo(
+      slug,
+      {
+        token: job.githubInstallationToken,
+        managedRepoFullName: payload.managedRepoFullName,
+        repoFullName: payload.repoFullName || job.git?.repoFullName,
+        defaultBranch: payload.defaultBranch || job.git?.defaultBranch || "main",
+        techLeadBranch:
+          payload.techLeadBranch || job.git?.techLeadBranch || "tech-lead",
+        sourceTechLead: payload.sourceTechLead || "tech-lead",
+      },
+      onLine
+    );
+    await notifyMigrateComplete(slug, { status: "ready" });
+    return { exitCode: 0, status: "succeeded" };
+  } catch (e) {
+    onLine(`Erro: ${e.message}\n`);
+    try {
+      await notifyMigrateComplete(slug, {
         status: "failed",
         error: e.message,
       });
