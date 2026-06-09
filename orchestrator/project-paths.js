@@ -87,6 +87,8 @@ export function agentFilePath(relativePath) {
   }
   const legacyFlat = path.join(tenantRoot(), "agents", path.basename(normalized));
   if (fs.existsSync(legacyFlat)) return legacyFlat;
+  const bundled = path.join(repoRoot, normalized);
+  if (fs.existsSync(bundled)) return bundled;
   if (normalized.startsWith("agents/")) {
     return path.join(agentsDir(), path.basename(normalized));
   }

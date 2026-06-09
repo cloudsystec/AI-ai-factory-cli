@@ -3,9 +3,26 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    chromium \
     curl \
     git \
     bash \
+    fonts-liberation \
+    libasound2 \
+    libatk-bridge2.0-0 \
+    libatk1.0-0 \
+    libcups2 \
+    libdbus-1-3 \
+    libdrm2 \
+    libgbm1 \
+    libgtk-3-0 \
+    libnspr4 \
+    libnss3 \
+    libx11-xcb1 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxrandr2 \
+    xdg-utils \
   && curl -fsSL https://cursor.com/install | bash \
   && /root/.local/bin/agent --version \
   && rm -rf /var/lib/apt/lists/* \
@@ -13,6 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && git config --global user.name "Factory Agent"
 
 ENV PATH="/root/.local/bin:${PATH}"
+ENV CHROMIUM_PATH=/usr/bin/chromium
 ENV CURSOR_AGENT=agent
 ENV CURSOR_AGENT_TRUST=1
 ENV CURSOR_AGENT_ARGS="-p --trust --force"

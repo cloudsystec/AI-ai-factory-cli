@@ -389,3 +389,39 @@ export async function getExecutionStateFromBack(slug) {
   );
   return res.json();
 }
+
+/**
+ * @param {string} slug
+ * @param {{ status: string, error?: string, readiness?: object }} body
+ */
+export async function notifyRailwayPublishOutcome(slug, body) {
+  await backFetch(
+    `/worker/projects/${encodeURIComponent(slug)}/railway-publish/outcome`,
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+    }
+  );
+}
+
+/**
+ * Estado Railway persistido (URL pública, ids) — fallback quando provision falha.
+ * @param {string} slug
+ */
+export async function fetchRailwayDeploymentState(slug) {
+  const res = await backFetch(
+    `/worker/projects/${encodeURIComponent(slug)}/railway-deployment`
+  );
+  return res.json();
+}
+
+/**
+ * Estado e logs do último build Railway (Docker build no deploy).
+ * @param {string} slug
+ */
+export async function fetchRailwayBuildDiagnostics(slug) {
+  const res = await backFetch(
+    `/worker/projects/${encodeURIComponent(slug)}/railway-build-logs`
+  );
+  return res.json();
+}

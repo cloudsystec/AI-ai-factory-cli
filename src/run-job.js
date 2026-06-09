@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import { REPO_ROOT, orchestratorImport } from "./repo-root.js";
 import { createLogger } from "./logger.js";
@@ -14,6 +15,7 @@ const CURSOR_AGENT_JOB_KINDS = new Set([
   "scope-tasks-only",
   "develop",
   "task",
+  "railway-publish",
 ]);
 
 /**
@@ -27,6 +29,14 @@ export async function runJobLocally(job, onLine) {
   }
   if (job.kind === "git-migrate") {
     return runGitMigrateJob(job, onLine);
+  }
+  if (job.kind === "railway-publish") {
+    const billingJobId = job.billingJobId || job.id;
+    process.env.AI_FACTORY_JOB_ID = billingJobId;
+    if (job.cursorApiKey) {
+      process.env.CURSOR_API_KEY = job.cursorApiKey;
+    }
+    return runRailwayPublishJob(job, onLine);
   }
 
   const project = job.projectSlug;
@@ -172,9 +182,15 @@ export async function runJobLocally(job, onLine) {
  */
 async function runProvisionJob(job, onLine) {
   const { ensureProjectFiles } = await orchestratorImport("create-project.js");
-  const { provisionProjectGit } = await orchestratorImport(
-    "git/provision-repo.js"
+  const {
+    provisionProjectGit,
+    exportExistingCodeTree,
+    pushImportedCodeTree,
+  } = await orchestratorImport("git/provision-repo.js");
+  const { realignOpenTaskWorkspaces } = await orchestratorImport(
+    "git/task-workspace.js"
   );
+  const { workspaceRoot } = await orchestratorImport("project-paths.js");
   const { notifyProvisionComplete } = await import("./back-client.js");
   const payload = job.payload || {};
   const slug = payload.slug || job.projectSlug;
@@ -186,6 +202,33 @@ async function runProvisionJob(job, onLine) {
     const created = ensureProjectFiles({ name, slug, scope });
     onLine(`Projeto criado: ${created.project}\n`);
     if (git?.repoFullName) {
+      const ws = workspaceRoot(slug);
+      const cacheDir = path.join(ws, ".git-cache");
+      const sourceTree = path.join(ws, ".git-provision-source");
+      /** @type {string|null} */
+      let exportedBranch = null;
+
+      if (git.resetGitCache && fs.existsSync(cacheDir)) {
+        onLine("[git] exportar código existente antes de trocar repositório…\n");
+        exportedBranch = exportExistingCodeTree(cacheDir, sourceTree, {
+          techLeadBranch: git.techLeadBranch || "tech-lead",
+          defaultBranch: git.defaultBranch || "main",
+        });
+        if (exportedBranch) {
+          onLine(`[git] código exportado da branch ${exportedBranch}\n`);
+        } else {
+          onLine("[git] cache sem branches — nada para exportar\n");
+          if (fs.existsSync(sourceTree)) {
+            fs.rmSync(sourceTree, { recursive: true, force: true });
+          }
+        }
+      }
+
+      if (git.resetGitCache && fs.existsSync(cacheDir)) {
+        onLine(`[git] limpar .git-cache (troca de repositório)…\n`);
+        fs.rmSync(cacheDir, { recursive: true, force: true });
+      }
+
       provisionProjectGit(
         slug,
         {
@@ -196,6 +239,30 @@ async function runProvisionJob(job, onLine) {
         },
         onLine
       );
+
+      if (exportedBranch && fs.existsSync(sourceTree)) {
+        pushImportedCodeTree(
+          slug,
+          {
+            repoFullName: git.repoFullName,
+            defaultBranch: git.defaultBranch || "main",
+            techLeadBranch: git.techLeadBranch || "tech-lead",
+            token: job.githubInstallationToken,
+          },
+          sourceTree,
+          onLine
+        );
+        fs.rmSync(sourceTree, { recursive: true, force: true });
+        realignOpenTaskWorkspaces(
+          slug,
+          {
+            techLeadBranch: git.techLeadBranch || "tech-lead",
+            token: job.githubInstallationToken,
+          },
+          onLine
+        );
+      }
+
       await notifyProvisionComplete(slug, { status: "ready" });
     }
     return { exitCode: 0, status: "succeeded" };
@@ -209,6 +276,31 @@ async function runProvisionJob(job, onLine) {
     } catch {
       /* ignore */
     }
+    return { exitCode: 1, status: "failed" };
+  }
+}
+
+/**
+ * @param {object} job
+ * @param {(line: string) => void} onLine
+ */
+async function runRailwayPublishJob(job, onLine) {
+  const { run } = await orchestratorImport("run-railway-publish.js");
+  const slug = job.projectSlug;
+  try {
+    const exitCode = await run(job, onLine);
+    return {
+      exitCode,
+      status: exitCode === 0 ? "succeeded" : "failed",
+    };
+  } catch (e) {
+    onLine(`Erro interno: ${e.message}\n`);
+    const { notifyRailwayPublishOutcome } = await import("./back-client.js");
+    await notifyRailwayPublishOutcome(slug, {
+      status: "failed",
+      error:
+        "Não foi possível publicar a aplicação automaticamente. Tente novamente.",
+    }).catch(() => {});
     return { exitCode: 1, status: "failed" };
   }
 }

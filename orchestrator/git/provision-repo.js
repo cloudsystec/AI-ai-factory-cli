@@ -4,6 +4,149 @@ import { workspaceRoot } from "../project-paths.js";
 import { gitExec } from "./git-exec.js";
 
 /**
+ * @param {string} srcDir
+ * @param {string} destDir
+ */
+export function copyDirContents(srcDir, destDir) {
+  if (!fs.existsSync(srcDir)) return;
+  for (const name of fs.readdirSync(srcDir)) {
+    if (name === ".git") continue;
+    const src = path.join(srcDir, name);
+    const dest = path.join(destDir, name);
+    if (fs.statSync(src).isDirectory()) {
+      fs.cpSync(src, dest, { recursive: true, force: true });
+    } else {
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.copyFileSync(src, dest);
+    }
+  }
+}
+
+/**
+ * @param {string} cacheDir
+ * @param {string} branch
+ */
+function resolveBranchRef(cacheDir, branch) {
+  if (localBranchExists(cacheDir, branch)) return branch;
+  if (remoteBranchExists(cacheDir, branch)) return `origin/${branch}`;
+  return null;
+}
+
+/**
+ * @param {string} cacheDir
+ * @param {string} branch
+ * @param {string} destDir
+ * @returns {boolean}
+ */
+export function exportBranchTree(cacheDir, branch, destDir) {
+  const ref = resolveBranchRef(cacheDir, branch);
+  if (!ref) return false;
+  if (fs.existsSync(destDir)) {
+    fs.rmSync(destDir, { recursive: true, force: true });
+  }
+  fs.mkdirSync(destDir, { recursive: true });
+  gitExec(
+    ["--git-dir", cacheDir, "--work-tree", destDir, "checkout", "-f", ref],
+    {}
+  );
+  return true;
+}
+
+/**
+ * Exporta código do bare cache (tech-lead → default → qualquer branch remota).
+ * @param {string} cacheDir
+ * @param {string} destDir
+ * @param {{ techLeadBranch?: string, defaultBranch?: string }} [opts]
+ * @returns {string|null} nome da branch exportada
+ */
+export function exportExistingCodeTree(cacheDir, destDir, opts = {}) {
+  const techLead = opts.techLeadBranch || "tech-lead";
+  const defaultBranch = opts.defaultBranch || "main";
+  for (const branch of [techLead, defaultBranch]) {
+    if (exportBranchTree(cacheDir, branch, destDir)) return branch;
+  }
+  const remote = findAnyRemoteBranch(cacheDir);
+  if (!remote) return null;
+  const name = remote.replace(/^origin\//, "");
+  if (exportBranchTree(cacheDir, name, destDir)) return name;
+  return null;
+}
+
+/**
+ * Envia árvore exportada para tech-lead no repo remoto (ex.: managed após desconexão).
+ * @param {string} project
+ * @param {{ repoFullName: string, defaultBranch?: string, techLeadBranch?: string, token?: string }} git
+ * @param {string} sourceTreeDir
+ * @param {(line: string) => void} [onLine]
+ */
+export function pushImportedCodeTree(project, git, sourceTreeDir, onLine = () => {}) {
+  if (!git?.token) {
+    throw new Error("Token GitHub obrigatório para importar código no repo managed");
+  }
+  if (!fs.existsSync(sourceTreeDir)) return;
+
+  const ws = workspaceRoot(project);
+  const cacheDir = path.join(ws, ".git-cache");
+  const techLead = git.techLeadBranch || "tech-lead";
+  const remoteUrl = tokenRemoteUrl(git.repoFullName, git.token);
+  const workDir = path.join(ws, ".git-import-tmp");
+
+  try {
+    if (fs.existsSync(workDir)) {
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+    onLine(
+      `[git] importar código existente → ${git.repoFullName}:${techLead}…\n`
+    );
+    gitExec(["clone", remoteUrl, workDir]);
+    gitExec(["checkout", "-B", techLead], { cwd: workDir });
+
+    for (const name of fs.readdirSync(workDir)) {
+      if (name === ".git") continue;
+      fs.rmSync(path.join(workDir, name), { recursive: true, force: true });
+    }
+    copyDirContents(sourceTreeDir, workDir);
+
+    gitExec(["add", "-A"], { cwd: workDir });
+    try {
+      gitExec(
+        ["commit", "-m", `[provision] código existente integrado em ${techLead}`],
+        { cwd: workDir }
+      );
+    } catch (e) {
+      const msg = String(e.message || e);
+      if (!msg.includes("nothing to commit")) throw e;
+      onLine("[git] nada novo para commitar (conteúdo já igual)\n");
+    }
+    try {
+      gitExec(["push", "-u", "origin", techLead], { cwd: workDir });
+    } catch {
+      onLine(`[git] push rejeitado — force-with-lease em ${techLead}…\n`);
+      gitExec(["fetch", "origin"], { cwd: workDir });
+      gitExec(["push", "-u", "--force-with-lease", "origin", techLead], {
+        cwd: workDir,
+      });
+    }
+
+    if (fs.existsSync(cacheDir)) {
+      gitExec(["remote", "set-url", "origin", remoteUrl], { cwd: cacheDir });
+      ensureBareRemoteTracking(cacheDir);
+      gitExec(["fetch", "origin"], { cwd: cacheDir });
+      if (localBranchExists(cacheDir, techLead)) {
+        gitExec(["branch", "-f", techLead, `origin/${techLead}`], { cwd: cacheDir });
+      } else {
+        gitExec(["branch", techLead, `origin/${techLead}`], { cwd: cacheDir });
+      }
+    }
+    onLine(`[git] código importado OK (${techLead})\n`);
+  } finally {
+    if (fs.existsSync(workDir)) {
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  }
+}
+
+/**
  * @param {string} project
  * @param {{ repoFullName: string, defaultBranch: string, techLeadBranch?: string, token?: string }} git
  * @param {(line: string) => void} [onLine]

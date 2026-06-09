@@ -133,13 +133,15 @@ async function syncAgentsForProject(projectSlug) {
 }
 
 /**
- * @param {string} jobId
- * @param {{ status: string, exitCode?: number, startedMs: number, finishedMs: number, billingEmail?: string }} opts
+ * @param {string} jobId — job infra a marcar complete (ex.: railway-publish)
+ * @param {{ status: string, exitCode?: number, startedMs: number, finishedMs: number, billingEmail?: string, billingJobId?: string }} opts
  */
 async function finishJobWithBilling(jobId, opts) {
-  const session = describeBillingSession(jobId);
+  const reconcileJobId = opts.billingJobId || jobId;
+  const session = describeBillingSession(reconcileJobId);
   log.info("Finalizando billing do job (worker)", {
     jobId,
+    billingJobId: reconcileJobId,
     pid: process.pid,
     billingEmail: opts.billingEmail || "(ausente)",
     ...session,
@@ -147,7 +149,7 @@ async function finishJobWithBilling(jobId, opts) {
 
   await flushPendingSettlements();
 
-  const reconciled = await reconcileJobBilling(jobId, {
+  const reconciled = await reconcileJobBilling(reconcileJobId, {
     startedMs: opts.startedMs,
     finishedMs: opts.finishedMs,
     email: opts.billingEmail || undefined,
@@ -162,10 +164,47 @@ async function finishJobWithBilling(jobId, opts) {
 
   log.info("Billing registado (summary BD + completeJob)", {
     jobId,
+    billingJobId: reconcileJobId,
     costBaseUsd: reconciled.totalCostBaseUsd.toFixed(4),
     calls: reconciled.callCount,
     chargeSource: reconciled.chargeSource,
   });
+}
+
+/**
+ * @param {object} job
+ */
+function applyJobBillingEnv(job) {
+  const billingJobId = job.billingJobId || job.id;
+  process.env.AI_FACTORY_JOB_ID = billingJobId;
+  process.env.AI_FACTORY_BILLING_SESSION_DIR = path.join(
+    tenantRoot,
+    "billing-sessions"
+  );
+  if (job.cursorApiKey) {
+    process.env.CURSOR_API_KEY = job.cursorApiKey;
+  }
+}
+
+/**
+ * @param {{ jobId?: string, cursorKey?: string, billingDir?: string }} saved
+ */
+function restoreJobBillingEnv(saved) {
+  if (saved.jobId !== undefined) {
+    if (saved.jobId) process.env.AI_FACTORY_JOB_ID = saved.jobId;
+    else delete process.env.AI_FACTORY_JOB_ID;
+  }
+  if (saved.cursorKey !== undefined) {
+    if (saved.cursorKey) process.env.CURSOR_API_KEY = saved.cursorKey;
+    else delete process.env.CURSOR_API_KEY;
+  }
+  if (saved.billingDir !== undefined) {
+    if (saved.billingDir) {
+      process.env.AI_FACTORY_BILLING_SESSION_DIR = saved.billingDir;
+    } else {
+      delete process.env.AI_FACTORY_BILLING_SESSION_DIR;
+    }
+  }
 }
 
 /**
@@ -175,6 +214,7 @@ async function finishJobWithBilling(jobId, opts) {
 async function processOneJob(job, ctx) {
   const { workerId, slot, botEmail } = ctx;
   const billingEmail = botEmail || job.botEmail || null;
+  const billingJobId = job.billingJobId || job.id;
   const jobStartedMs = Date.now();
   const projectSlug =
     job.projectSlug ||
@@ -184,6 +224,7 @@ async function processOneJob(job, ctx) {
 
   log.debug("Job processamento iniciado", {
     jobId: job.id,
+    billingJobId,
     kind: job.kind,
     project: projectSlug || "—",
     task: job.taskId || "—",
@@ -194,6 +235,13 @@ async function processOneJob(job, ctx) {
   if (billingEmail) {
     process.env.CURSOR_USAGE_EMAIL = billingEmail;
   }
+
+  const savedBillingEnv = {
+    jobId: process.env.AI_FACTORY_JOB_ID,
+    cursorKey: process.env.CURSOR_API_KEY,
+    billingDir: process.env.AI_FACTORY_BILLING_SESSION_DIR,
+  };
+  applyJobBillingEnv(job);
 
   /** @type {ReturnType<typeof setInterval>|null} */
   let dashboardTimer = null;
@@ -206,12 +254,15 @@ async function processOneJob(job, ctx) {
     }
 
     await resetJobLog(job.id);
-    const clearedPath = clearBillingSession(job.id);
-    if (clearedPath) {
-      log.info("Sessão billing anterior removida", {
-        jobId: job.id,
-        path: clearedPath,
-      });
+    if (billingJobId === job.id) {
+      const clearedPath = clearBillingSession(billingJobId);
+      if (clearedPath) {
+        log.info("Sessão billing anterior removida", {
+          jobId: job.id,
+          billingJobId,
+          path: clearedPath,
+        });
+      }
     }
     await appendJobLogLine(
       job.id,
@@ -293,6 +344,7 @@ async function processOneJob(job, ctx) {
       startedMs: jobStartedMs,
       finishedMs,
       billingEmail,
+      billingJobId,
     });
     const durationSec = ((Date.now() - jobStartedMs) / 1000).toFixed(1);
     log.info("Job concluído", {
@@ -321,6 +373,7 @@ async function processOneJob(job, ctx) {
         startedMs: jobStartedMs,
         finishedMs,
         billingEmail,
+        billingJobId,
       });
     } catch (e2) {
       log.error("Falha ao completar job", { error: e2.message });
@@ -342,6 +395,7 @@ async function processOneJob(job, ctx) {
         delete process.env.CURSOR_USAGE_EMAIL;
       }
     }
+    restoreJobBillingEnv(savedBillingEnv);
     runningBySlot.set(slot, false);
     currentJobBySlot.delete(slot);
     void syncRuntimeToBack();
@@ -424,13 +478,18 @@ async function slotHasPlay(slot) {
   }
 }
 
-async function tryClaimProvision(slot, workerId) {
+async function tryClaimInfra(slot, workerId) {
   try {
     const claimed = await claimJob(workerId, { provisionOnly: true });
     if (claimed.error === "bot_not_configured") return false;
     const job = claimed.job;
-    if (!job || !["provision", "git-migrate"].includes(job.kind)) return false;
-    log.info("Infra Git claimed", {
+    if (
+      !job ||
+      !["provision", "git-migrate", "railway-publish"].includes(job.kind)
+    ) {
+      return false;
+    }
+    log.info("Infra job claimed", {
       slot,
       jobId: job.id,
       kind: job.kind,
@@ -458,8 +517,8 @@ async function loopForSlot(slot) {
   const inPlay = await slotHasPlay(slot);
 
   if (!inPlay) {
-    const didProvision = await tryClaimProvision(slot, workerId);
-    if (didProvision) return 0;
+    const didInfra = await tryClaimInfra(slot, workerId);
+    if (didInfra) return 0;
     return IDLE_POLL_MS;
   }
 
@@ -529,17 +588,21 @@ function startSlotLoop(slot) {
 
 async function refreshActiveSlots() {
   const data = await fetchBotsReady();
-  const ready = (data.workers || [])
+  const botReadySlots = (data.workers || [])
     .filter((w) => w.botReady)
     .map((w) => w.slot);
-  if (ready.length === 0) {
-    log.warn("Nenhum bot configurado — aguardando admin da plataforma");
+  const ready = new Set(botReadySlots);
+  // Slot 1 faz polling de jobs de infra (provision, git-migrate, publicação) mesmo sem bot.
+  ready.add(1);
+  const readyList = [...ready].sort((a, b) => a - b);
+  if (readyList.length === 0) {
+    log.warn("Nenhum slot activo — aguardando configuração");
     activeSlots = [];
     return;
   }
   const prev = new Set(activeSlots);
-  activeSlots = ready;
-  for (const slot of ready) {
+  activeSlots = readyList;
+  for (const slot of readyList) {
     if (!prev.has(slot)) {
       const workerId = workerIdForSlot(slot);
       await registerWorker(workerId).catch((e) =>
@@ -550,7 +613,7 @@ async function refreshActiveSlots() {
       log.info("Loop iniciado para slot", { slot, workerId });
     }
   }
-  if (ready.length > 0) {
+  if (readyList.length > 0) {
     void syncRuntimeToBack();
   }
 }

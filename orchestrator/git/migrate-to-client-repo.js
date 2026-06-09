@@ -2,49 +2,15 @@ import fs from "node:fs";
 import path from "node:path";
 import { workspaceRoot } from "../project-paths.js";
 import { gitExec } from "./git-exec.js";
-import { provisionProjectGit } from "./provision-repo.js";
-import { ensureTaskWorkspace } from "./task-workspace.js";
-import { taskStateFile } from "../project-paths.js";
+import {
+  copyDirContents,
+  exportBranchTree,
+  provisionProjectGit,
+} from "./provision-repo.js";
+import { realignOpenTaskWorkspaces } from "./task-workspace.js";
 
 function tokenRemoteUrl(repoFullName, token) {
   return `https://x-access-token:${token}@github.com/${repoFullName}.git`;
-}
-
-/**
- * @param {string} srcDir
- * @param {string} destDir
- */
-function copyDirContents(srcDir, destDir) {
-  if (!fs.existsSync(srcDir)) return;
-  for (const name of fs.readdirSync(srcDir)) {
-    if (name === ".git") continue;
-    const src = path.join(srcDir, name);
-    const dest = path.join(destDir, name);
-    if (fs.statSync(src).isDirectory()) {
-      fs.cpSync(src, dest, { recursive: true, force: true });
-    } else {
-      fs.mkdirSync(path.dirname(dest), { recursive: true });
-      fs.copyFileSync(src, dest);
-    }
-  }
-}
-
-/**
- * @param {string} cacheDir
- * @param {string} branch
- * @param {string} destDir
- */
-function exportBranchTree(cacheDir, branch, destDir) {
-  fs.mkdirSync(destDir, { recursive: true });
-  gitExec([
-    "--git-dir",
-    cacheDir,
-    "--work-tree",
-    destDir,
-    "checkout",
-    "-f",
-    branch,
-  ]);
 }
 
 /**
@@ -136,33 +102,12 @@ export async function migrateToClientRepo(project, opts, onLine = () => {}) {
     onLine
   );
 
-  const statePath = taskStateFile(project);
-  /** @type {Array<{ id?: string, status?: string }>} */
-  let tasksState = [];
-  if (fs.existsSync(statePath)) {
-    try {
-      tasksState = JSON.parse(fs.readFileSync(statePath, "utf-8"));
-    } catch {
-      tasksState = [];
-    }
-  }
-
-  const openTasks = tasksState.filter(
-    (t) => t?.id && t.status !== "done"
+  await realignOpenTaskWorkspaces(
+    project,
+    { techLeadBranch, token },
+    onLine,
+    "[git-migrate]"
   );
-  if (openTasks.length > 0) {
-    onLine(
-      `[git-migrate] realinhar ${openTasks.length} task(s) em curso…\n`
-    );
-    for (const t of openTasks) {
-      ensureTaskWorkspace(
-        project,
-        t.id,
-        { techLeadBranch, token, forceRecreate: true },
-        onLine
-      );
-    }
-  }
 
   onLine(`[git-migrate] concluído (${managedRepoFullName || "?"} → ${repoFullName})\n`);
 }

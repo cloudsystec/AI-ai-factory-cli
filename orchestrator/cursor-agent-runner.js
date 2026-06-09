@@ -20,6 +20,7 @@ const log = createLogger("agent");
  *   skipAgents?: boolean,
  *   debugPromptDir?: string,
  *   meta?: { project?: string, task?: string, step?: string },
+ *   timeoutMs?: number,
  * }} opts
  */
 export function runCursorAgent(opts) {
@@ -30,9 +31,12 @@ export function runCursorAgent(opts) {
     skipAgents = false,
     debugPromptDir,
     meta = {},
+    timeoutMs,
   } = opts;
 
-  const AGENT_TIMEOUT_MS = Number(process.env.AGENT_TIMEOUT_MS || 300_000);
+  const AGENT_TIMEOUT_MS = Number(
+    timeoutMs || process.env.AGENT_TIMEOUT_MS || 300_000
+  );
   const label = agentName || agentFile;
 
   const callId = recordAiCallStart({

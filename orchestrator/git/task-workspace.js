@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { workspaceRoot } from "../project-paths.js";
+import { workspaceRoot, taskStateFile } from "../project-paths.js";
 import { gitExec } from "./git-exec.js";
 
 export function taskCodeDir(project, taskId) {
@@ -268,4 +268,44 @@ export function ensureTaskWorkspace(project, taskId, opts = {}, onLine = () => {
   const sha = gitExec(["rev-parse", "--short", "HEAD"], { cwd: codeDir });
   onLine(`[git] Base da task: ${techLead} @ ${sha}\n`);
   return codeDir;
+}
+
+/**
+ * Recria worktrees de tasks em curso após troca de repositório remoto.
+ * @param {string} project
+ * @param {{ techLeadBranch?: string, token?: string }} opts
+ * @param {(line: string) => void} [onLine]
+ * @param {string} [logPrefix]
+ */
+export function realignOpenTaskWorkspaces(
+  project,
+  opts = {},
+  onLine = () => {},
+  logPrefix = "[git]"
+) {
+  const statePath = taskStateFile(project);
+  /** @type {Array<{ id?: string, status?: string }>} */
+  let tasksState = [];
+  if (fs.existsSync(statePath)) {
+    try {
+      tasksState = JSON.parse(fs.readFileSync(statePath, "utf-8"));
+    } catch {
+      tasksState = [];
+    }
+  }
+
+  const openTasks = tasksState.filter((t) => t?.id && t.status !== "done");
+  if (openTasks.length === 0) return;
+
+  onLine(
+    `${logPrefix} realinhar ${openTasks.length} task(s) em curso…\n`
+  );
+  for (const t of openTasks) {
+    ensureTaskWorkspace(
+      project,
+      t.id,
+      { ...opts, forceRecreate: true },
+      onLine
+    );
+  }
 }
