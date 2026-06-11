@@ -1,8 +1,10 @@
+/**
+ * Veredito QA por task (legado) e por micro (task de fechamento).
+ */
 import fs from "node:fs";
 import path from "node:path";
 
 /**
- * Caminho do veredito machine-readable do QA (usado pelo orquestrador).
  * @param {string} workspaceRootAbs
  * @param {string} taskId
  */
@@ -11,7 +13,14 @@ export function qaVerdictFile(workspaceRootAbs, taskId) {
 }
 
 /**
- * Remove veredito anterior para o QA gravar um novo a cada ronda.
+ * @param {string} workspaceRootAbs
+ * @param {string} microId
+ */
+export function microQaVerdictFile(workspaceRootAbs, microId) {
+  return path.join(workspaceRootAbs, "reports", "scopes", `${microId}-qa-verdict.json`);
+}
+
+/**
  * @param {string} workspaceRootAbs
  * @param {string} taskId
  */
@@ -22,22 +31,26 @@ export function clearQaVerdict(workspaceRootAbs, taskId) {
   }
 }
 
+/**
+ * @param {string} workspaceRootAbs
+ * @param {string} microId
+ */
+export function clearMicroQaVerdict(workspaceRootAbs, microId) {
+  const p = microQaVerdictFile(workspaceRootAbs, microId);
+  if (fs.existsSync(p)) {
+    fs.unlinkSync(p);
+  }
+}
+
 function readUtf8(p) {
   return fs.readFileSync(p, "utf-8").replace(/^\uFEFF/, "");
 }
 
-/**
- * Lê o veredito do QA. Falha fechada se ficheiro inválido ou ausente.
- * @param {string} workspaceRootAbs
- * @param {string} taskId
- * @returns {{ verdict: "pass" | "fail", summary: string, code?: string }}
- */
-export function readQaVerdict(workspaceRootAbs, taskId) {
-  const p = qaVerdictFile(workspaceRootAbs, taskId);
+function parseVerdictFile(p, missingLabel) {
   if (!fs.existsSync(p)) {
     return {
       verdict: "fail",
-      summary: "Ficheiro reports/tasks/<TASK>-qa-verdict.json ausente — o QA deve gravá-lo.",
+      summary: missingLabel,
       code: "MISSING",
     };
   }
@@ -58,8 +71,30 @@ export function readQaVerdict(workspaceRootAbs, taskId) {
   } catch {
     return {
       verdict: "fail",
-      summary: "JSON inválido em qa-verdict.json.",
+      summary: "JSON inválido no veredito QA.",
       code: "INVALID_JSON",
     };
   }
+}
+
+/**
+ * @param {string} workspaceRootAbs
+ * @param {string} taskId
+ */
+export function readQaVerdict(workspaceRootAbs, taskId) {
+  return parseVerdictFile(
+    qaVerdictFile(workspaceRootAbs, taskId),
+    "Ficheiro reports/tasks/<TASK>-qa-verdict.json ausente — o QA deve gravá-lo."
+  );
+}
+
+/**
+ * @param {string} workspaceRootAbs
+ * @param {string} microId
+ */
+export function readMicroQaVerdict(workspaceRootAbs, microId) {
+  return parseVerdictFile(
+    microQaVerdictFile(workspaceRootAbs, microId),
+    "Ficheiro reports/scopes/<MICRO>-qa-verdict.json ausente — o QA do micro deve gravá-lo."
+  );
 }

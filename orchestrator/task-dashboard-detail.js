@@ -9,6 +9,8 @@ import {
 } from "./project-paths.js";
 import { readBacklogFile } from "./backlog-io.js";
 import { buildPipelineSummary } from "./task-pipeline-state.js";
+import { isMicroCloserTask } from "./micro-task-utils.js";
+import { microQaVerdictFile } from "./qa-verdict.js";
 
 const PREVIEW_MAX_CHARS = 2000;
 const EVIDENCE_TAIL_LINES = 80;
@@ -75,7 +77,7 @@ function loadRuntimeState(project, taskId) {
  * @param {string} wsRoot
  * @param {string} taskId
  */
-function collectArtifacts(wsRoot, taskId) {
+function collectArtifacts(wsRoot, taskId, meta = {}) {
   const artifacts = [];
 
   const docRel = `docs/tasks/${taskId}.md`;
@@ -132,6 +134,31 @@ function collectArtifacts(wsRoot, taskId) {
   }
   artifacts.push(verdictEntry);
 
+  if (meta.isMicroCloser && meta.sourceMicroId) {
+    const microVerdictRel = repoRelativePosix(
+      microQaVerdictFile(wsRoot, meta.sourceMicroId)
+    );
+    const microVerdictAbs = path.join(wsRoot, microVerdictRel);
+    const microVerdictEntry = {
+      kind: "microQaVerdict",
+      label: "Veredito QA do micro (JSON)",
+      path: microVerdictRel,
+      exists: fs.existsSync(microVerdictAbs),
+    };
+    if (microVerdictEntry.exists) {
+      try {
+        const raw = JSON.parse(
+          fs.readFileSync(microVerdictAbs, "utf-8").replace(/^\uFEFF/, "")
+        );
+        microVerdictEntry.verdict = raw.verdict ?? null;
+        microVerdictEntry.summary = raw.summary ?? "";
+      } catch {
+        microVerdictEntry.parseError = true;
+      }
+    }
+    artifacts.push(microVerdictEntry);
+  }
+
   const evidenceRel = `evidence/tests/${taskId}-test-output.txt`;
   const evidenceAbs = path.join(wsRoot, evidenceRel);
   const evidenceEntry = {
@@ -175,6 +202,7 @@ export function buildTaskDetail(project, taskId) {
         description: normalizeBacklogTextField(task.description),
         acceptance: normalizeBacklogTextField(task.acceptance),
         testStrategy: normalizeBacklogTextField(task.testStrategy),
+        isMicroCloser: isMicroCloserTask(task),
         dependencies: Array.isArray(task.dependencies) ? task.dependencies : [],
         status: task.status ?? null,
         approved: task.approved ?? null,
@@ -190,7 +218,11 @@ export function buildTaskDetail(project, taskId) {
     return null;
   }
 
-  const pipeline = buildPipelineSummary(runtime);
+  const pipeline = buildPipelineSummary(
+    runtime
+      ? { ...runtime, isMicroCloser: backlog?.isMicroCloser === true }
+      : null
+  );
 
   return {
     taskId,
@@ -207,6 +239,9 @@ export function buildTaskDetail(project, taskId) {
       : null,
     backlog,
     pipeline,
-    artifacts: collectArtifacts(wsRoot, taskId),
+    artifacts: collectArtifacts(wsRoot, taskId, {
+      isMicroCloser: backlog?.isMicroCloser === true,
+      sourceMicroId: backlog?.sourceMicroId ?? null,
+    }),
   };
 }

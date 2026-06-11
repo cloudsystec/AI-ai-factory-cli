@@ -50,6 +50,7 @@ function backlogRowToDashboard(project, backlogTask) {
     status,
     currentAgent: null,
     updatedAt: backlogTask.updatedAt ?? null,
+    isMicroCloser: backlogTask.isMicroCloser === true,
     backlogReady: status === "todo",
     backlogInProgress: status === "in_progress",
   };
@@ -69,14 +70,21 @@ export function buildDashboardTasks(project) {
   const runtime = loadRuntimeTasks(project);
   const runtimeIds = new Set(runtime.map((t) => t.id));
 
+  let backlogById = new Map();
   let backlogReady = [];
   const backlogPath = backlogFile(project);
   if (fs.existsSync(backlogPath)) {
     const doc = readBacklogFile(backlogPath, { project });
+    backlogById = new Map(doc.tasks.map((t) => [t.id, t]));
     backlogReady = doc.tasks
       .filter((t) => isBacklogKanbanVisible(t) && !runtimeIds.has(t.id))
       .map((t) => backlogRowToDashboard(project, t));
   }
 
-  return [...runtime, ...backlogReady];
+  const enrichedRuntime = runtime.map((t) => ({
+    ...t,
+    isMicroCloser: backlogById.get(t.id)?.isMicroCloser === true,
+  }));
+
+  return [...enrichedRuntime, ...backlogReady];
 }

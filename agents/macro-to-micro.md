@@ -28,9 +28,15 @@ Cada microescopo deve ter:
 - macroId
 - title
 - description
+- acceptance (array de critérios verificáveis do micro — QA roda só na task de fechamento)
+- testStrategy (comando ou cenário E2E para validar o micro inteiro, ex.: npm test)
+- dependencies
+- risks
 - status
 - priority
 - approved
+
+Inclua em `description` o contexto de produto; mova "Como validar" para `acceptance` e `testStrategy`.
 
 Evite micros que só gerem **papéis** sem caminho claro para software testável.
 

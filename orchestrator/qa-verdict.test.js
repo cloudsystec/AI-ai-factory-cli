@@ -7,6 +7,8 @@ import {
   clearQaVerdict,
   qaVerdictFile,
   readQaVerdict,
+  readMicroQaVerdict,
+  microQaVerdictFile,
 } from "./qa-verdict.js";
 
 test("readQaVerdict: missing file is fail", () => {
@@ -28,5 +30,15 @@ test("readQaVerdict: pass and fail", () => {
   assert.strictEqual(readQaVerdict(dir, "TASK-1").verdict, "fail");
   clearQaVerdict(dir, "TASK-1");
   assert.strictEqual(fs.existsSync(p), false);
+  fs.rmSync(dir, { recursive: true });
+});
+
+test("readMicroQaVerdict: scopes path", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mqf-"));
+  const reports = path.join(dir, "reports", "scopes");
+  fs.mkdirSync(reports, { recursive: true });
+  const p = microQaVerdictFile(dir, "MICRO-1");
+  fs.writeFileSync(p, JSON.stringify({ verdict: "pass", summary: "micro ok" }), "utf-8");
+  assert.strictEqual(readMicroQaVerdict(dir, "MICRO-1").verdict, "pass");
   fs.rmSync(dir, { recursive: true });
 });

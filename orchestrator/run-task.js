@@ -11,11 +11,12 @@ import {
     workspaceRoot,
 } from "./project-paths.js";
 import { readBacklogFile, writeBacklogFile } from "./backlog-io.js";
-import { clearQaVerdict, readQaVerdict, qaVerdictFile } from "./qa-verdict.js";
+import { qaVerdictFile, clearMicroQaVerdict, readMicroQaVerdict, microQaVerdictFile } from "./qa-verdict.js";
 import { readAgentFile, readGlobalRules, systemSecurityRules } from "./agent-prompts.js";
 import { runCursorAgent } from "./cursor-agent-runner.js";
 import { runWithErrorRecovery } from "./error-recovery.js";
 import { syncTaskDeliveryFlags } from "./micro-delivery.js";
+import { shouldRunTaskQa } from "./micro-task-utils.js";
 import {
     flushPendingSettlements,
     installBillingSignalHandlers,
@@ -70,6 +71,25 @@ if (!task) {
 function read(file) {
     return fs.readFileSync(file, "utf-8").replace(/^\uFEFF/, "");
 }
+
+function loadMicroForTask() {
+    if (!fs.existsSync(microPath)) return null;
+    try {
+        const raw = JSON.parse(read(microPath));
+        const list = Array.isArray(raw)
+            ? raw
+            : raw.microscopes || raw.microScopes || raw.items || [];
+        return list.find((m) => m.id === task.sourceMicroId) || null;
+    } catch {
+        return null;
+    }
+}
+
+const micro = loadMicroForTask();
+const runsTaskQa = shouldRunTaskQa(task, micro);
+const microQaVerdictRel = micro
+    ? repoRelativePosix(microQaVerdictFile(wsRoot, micro.id))
+    : null;
 
 function loadState() {
     if (!fs.existsSync(stateFile)) return [];
@@ -276,6 +296,7 @@ function effectiveResumeStep() {
 }
 
 function shouldSkipStep(stepId) {
+    if (stepId === "qa" && !runsTaskQa) return true;
     const resume = effectiveResumeStep();
     if (!resume) return false;
     const resumeIdx = STEP_ORDER.indexOf(resume);
@@ -534,21 +555,35 @@ async function runTaskPipeline() {
 
         // --- DEV ---
         if (!shouldSkipStep("dev") || retryMode === "agent") {
-            runAgent(
-                "agents/dev.md",
-                "development",
-                "Dev Agent",
-                `Implemente a tarefa dentro de ${codeRootPrompt}/ (código da aplicação).
+            const devInstruction = runsTaskQa
+                ? `Implemente a task de fechamento do micro dentro de ${codeRootPrompt}/ (código integrado na branch tech-lead).
+O package.json do projeto deve ficar em ${codeRootPrompt}/package.json.
+
+Contexto:
+- Micro: ${micro?.title || task.sourceMicroId}
+- Descrição da task: ${task.description}
+- Critérios QA do micro (referência): ${JSON.stringify(micro?.acceptance || [])}
+- Estratégia de teste do micro: ${micro?.testStrategy || `npm test --prefix ${testPrefix}`}
+
+Esta é a task de fechamento — após o Dev, o orquestrador atualiza critérios QA, executa testes integrados e corre o QA Agent sobre o micro completo.
+Grave relatórios em ${reportRootPrompt}/reports/tasks/${task.id}-dev.md.
+Atualize ${reportRootPrompt}/docs/tasks/${task.id}.md com arquivos alterados e decisões.`
+                : `Implemente a tarefa dentro de ${codeRootPrompt}/ (código da aplicação).
 O package.json do projeto deve ficar em ${codeRootPrompt}/package.json.
 
 Contexto da task:
 - Descrição: ${task.description}
-- Critérios de aceite: ${JSON.stringify(task.acceptance)}
-- Estratégia de teste: ${task.testStrategy || "Executar npm test"}
+- Critérios de aceite (orientação Dev): ${JSON.stringify(task.acceptance)}
 
-O orquestrador executa \`npm test --prefix ${testPrefix}\` após o Dev encerrar. Garanta que o script "test" no package.json funcione.
+Esta é uma task intermediária — **não** há npm test nem QA Agent nesta execução. A validação automatizada ocorre na task de fechamento do micro.
 Grave relatórios em ${reportRootPrompt}/reports/tasks/${task.id}-dev.md.
-Atualize ${reportRootPrompt}/docs/tasks/${task.id}.md com arquivos alterados e decisões.`,
+Atualize ${reportRootPrompt}/docs/tasks/${task.id}.md com arquivos alterados e decisões.`;
+
+            runAgent(
+                "agents/dev.md",
+                "development",
+                "Dev Agent",
+                devInstruction,
                 { step: "development" }
             );
             await checkPause("dev");
@@ -556,52 +591,110 @@ Atualize ${reportRootPrompt}/docs/tasks/${task.id}.md com arquivos alterados e d
             console.log(`\n=== Saltando Dev (já concluído) ===\n`);
         }
 
-        // --- QA LOOP (sem pause dentro do ciclo QA-fail → Dev) ---
-        if (!shouldSkipStep("qa") || retryMode === "agent") {
+        // --- QA (apenas task de fechamento / isMicroCloser) ---
+        if (runsTaskQa && (!shouldSkipStep("qa") || retryMode === "agent")) {
+            if (!shouldSkipStep("qa")) {
+                runAgent(
+                    "agents/micro-qa-refresh.md",
+                    "development",
+                    "Micro QA Refresh",
+                    `Consolide critérios QA do micro ${micro?.id || task.sourceMicroId}.
+
+Micro JSON:
+${microPath}
+
+Tasks do micro (backlog):
+${JSON.stringify(
+                        backlogDoc.tasks.filter((t) => t.sourceMicroId === task.sourceMicroId),
+                        null,
+                        2
+                    )}
+
+Atualize acceptance e testStrategy no ficheiro de microescopos.
+Grave relatório em ${reportRootPrompt}/reports/scopes/${micro?.id || task.sourceMicroId}-qa-refresh.md.`,
+                    { step: "refresh_micro_qa" }
+                );
+            }
+
+            const microAcceptance = () => {
+                if (!microPath || !fs.existsSync(microPath)) return micro?.acceptance || [];
+                try {
+                    const raw = JSON.parse(read(microPath));
+                    const list = Array.isArray(raw)
+                        ? raw
+                        : raw.microscopes || raw.microScopes || raw.items || [];
+                    const m = list.find((x) => x.id === task.sourceMicroId);
+                    return m?.acceptance || micro?.acceptance || [];
+                } catch {
+                    return micro?.acceptance || [];
+                }
+            };
+
+            const microTestStrategy = () => {
+                if (!microPath || !fs.existsSync(microPath)) {
+                    return micro?.testStrategy || `npm test --prefix ${testPrefix}`;
+                }
+                try {
+                    const raw = JSON.parse(read(microPath));
+                    const list = Array.isArray(raw)
+                        ? raw
+                        : raw.microscopes || raw.microScopes || raw.items || [];
+                    const m = list.find((x) => x.id === task.sourceMicroId);
+                    return m?.testStrategy || micro?.testStrategy || `npm test --prefix ${testPrefix}`;
+                } catch {
+                    return micro?.testStrategy || `npm test --prefix ${testPrefix}`;
+                }
+            };
+
             for (let qaRound = 0; ; qaRound++) {
                 const testResult = runTests(task.id);
 
-                clearQaVerdict(wsRoot, task.id);
+                clearMicroQaVerdict(wsRoot, micro?.id || task.sourceMicroId);
 
                 runAgent(
                     "agents/qa.md",
                     "testing",
                     "QA Agent",
-                    `Valide a implementação dentro de ${codeRootPrompt}/.
+                    `Valide o **micro inteiro** integrado em ${codeRootPrompt}/ (branch tech-lead mergeada).
 
-            O orquestrador já executou os testes localmente.
+Micro: ${micro?.title || task.sourceMicroId}
+Critérios de aceite (micro.acceptance):
+${JSON.stringify(microAcceptance(), null, 2)}
 
-            Evidência temporária disponível em:
-            ${testResult.evidenceFile}
+Estratégia de teste (micro.testStrategy):
+${microTestStrategy()}
 
-            Resultado técnico:
-            - exitCode: ${testResult.exitCode}
-            - passed: ${testResult.passed}
+O orquestrador já executou os testes localmente.
 
-            Leia a evidência.
-            Grave o relatório final em ${reportRootPrompt}/reports/tasks/${task.id}-qa.md.
-            Informe se os testes passaram ou falharam.
-            Registre bugs, riscos e observações.
-            Não tente rodar npm test novamente.
+Evidência temporária disponível em:
+${testResult.evidenceFile}
 
-            OBRIGATÓRIO — gate do orquestrador:
-            Crie o ficheiro ${qaVerdictRel} com JSON válido no formato:
-            { "verdict": "pass" | "fail", "summary": "uma frase objetiva" }
-            - Use "fail" se existir bug, critério de aceite não cumprido, ou exitCode != 0 sem justificativa explícita no relatório QA.
-            - Use "pass" só se estiver seguro para seguir para o Reviewer.
-            Se gravar "fail", o orquestrador manda o Dev corrigir, volta a correr testes e chama o QA de novo — a task não segue com erro.`,
+Resultado técnico:
+- exitCode: ${testResult.exitCode}
+- passed: ${testResult.passed}
+
+Leia a evidência.
+Grave o relatório final em ${reportRootPrompt}/reports/scopes/${micro?.id || task.sourceMicroId}-qa.md.
+Valide **todas** as tasks irmãs do micro — reprove se restar pendência no código integrado.
+Não tente rodar npm test novamente.
+
+OBRIGATÓRIO — gate do orquestrador:
+Crie o ficheiro ${microQaVerdictRel} com JSON válido no formato:
+{ "verdict": "pass" | "fail", "summary": "uma frase objetiva" }
+- Use "fail" se existir bug, critério do micro não cumprido, ou exitCode != 0 sem justificativa explícita.
+- Use "pass" só se o incremento integrado estiver pronto para release.`,
                     { step: "testing", qaRound }
                 );
 
-                const verdict = readQaVerdict(wsRoot, task.id);
+                const verdict = readMicroQaVerdict(wsRoot, micro?.id || task.sourceMicroId);
                 if (verdict.verdict === "pass") {
-                    console.log(`\n=== QA aprovou (veredito): ${verdict.summary || "ok"} ===\n`);
+                    console.log(`\n=== QA do micro aprovou (veredito): ${verdict.summary || "ok"} ===\n`);
                     break;
                 }
 
                 if (qaRound >= MAX_QA_FAILURE_RETRIES) {
                     console.error(
-                        `\nQA reprovou após ${MAX_QA_FAILURE_RETRIES + 1} ronda(s) de QA. Último motivo: ${verdict.summary}\n`
+                        `\nQA do micro reprovou após ${MAX_QA_FAILURE_RETRIES + 1} ronda(s). Último motivo: ${verdict.summary}\n`
                     );
                     throw new Error("QA max retries");
                 }
@@ -614,17 +707,19 @@ Atualize ${reportRootPrompt}/docs/tasks/${task.id}.md com arquivos alterados e d
                     "agents/dev.md",
                     "development",
                     "Dev Agent",
-                    `Correção pós-QA (ciclo ${qaRound + 2}): o QA reprovou.
+                    `Correção pós-QA do micro (ciclo ${qaRound + 2}): o QA reprovou.
 Leia integralmente:
-- ${reportRootPrompt}/reports/tasks/${task.id}-qa.md
-- ${qaVerdictRel}
-Corrija os problemas reportados no código em ${codeRootPrompt}/.
+- ${reportRootPrompt}/reports/scopes/${micro?.id || task.sourceMicroId}-qa.md
+- ${microQaVerdictRel}
+Corrija os problemas reportados no código integrado em ${codeRootPrompt}/.
 O orquestrador executa \`npm test --prefix ${testPrefix}\` após esta correção.
 Acrescente secção de correção em ${reportRootPrompt}/reports/tasks/${task.id}-dev.md.`,
                     { step: "development_correction", qaRound: qaRound + 1 }
                 );
             }
             await checkPause("qa");
+        } else if (!runsTaskQa) {
+            console.log(`\n=== Task intermediária — saltando testes e QA Agent ===\n`);
         } else {
             console.log(`\n=== Saltando QA (já concluído) ===\n`);
         }
@@ -633,7 +728,8 @@ Acrescente secção de correção em ${reportRootPrompt}/reports/tasks/${task.id
         cleanupTestEvidence(task.id);
 
         if (process.env.AI_FACTORY_GITHUB_TOKEN) {
-            updateTaskState("running", "Verificando PR…", { lastCompletedStep: "qa" });
+            const preFinalizeStep = runsTaskQa ? "qa" : "dev";
+            updateTaskState("running", "Verificando PR…", { lastCompletedStep: preFinalizeStep });
             const alreadyMerged = await checkPrAlreadyMerged(jobGitCtx, taskId, (l) => console.log(l));
             if (alreadyMerged) {
                 console.log(`\n=== PR já mergeado — task concluída ===\n`);
@@ -645,7 +741,7 @@ Acrescente secção de correção em ${reportRootPrompt}/reports/tasks/${task.id
                 return;
             }
 
-            updateTaskState("running", "Git push / PR", { lastCompletedStep: "qa" });
+            updateTaskState("running", "Git push / PR", { lastCompletedStep: preFinalizeStep });
             try {
                 await finalizeGitForTask(project, taskId, task, {
                     jobId: process.env.AI_FACTORY_JOB_ID,

@@ -1,6 +1,6 @@
 /**
  * Passos do pipeline de `orchestrator/run-task.js` (dashboard + API de detalhe).
- * "testing" divide-se por `currentAgent`: runner local vs QA.
+ * Tasks intermediárias omitem test_run e qa; só a task de fechamento inclui QA.
  */
 export const PIPELINE_STEPS = [
   { key: "planning", label: "Plano", short: "📋" },
@@ -11,28 +11,46 @@ export const PIPELINE_STEPS = [
   { key: "done", label: "Entrega", short: "🚀" },
 ];
 
+const INTERMEDIATE_HIDDEN_KEYS = new Set(["test_run", "qa"]);
+
+/**
+ * @param {{ isMicroCloser?: boolean } | null | undefined} task
+ */
+export function getPipelineStepsForTask(task) {
+  if (task?.isMicroCloser) return PIPELINE_STEPS;
+  return PIPELINE_STEPS.filter((s) => !INTERMEDIATE_HIDDEN_KEYS.has(s.key));
+}
+
 /**
  * Índice do passo em execução (0-based), ou -1 se bloqueado, -2 se desconhecido/fora do fluxo.
- * @param {{ status?: string, currentAgent?: string } | null | undefined} task
+ * @param {{ status?: string, currentAgent?: string, isMicroCloser?: boolean, lastCompletedStep?: string } | null | undefined} task
  */
 export function getActiveStepIndex(task) {
   if (!task || task.status === "blocked") return -1;
+  const steps = getPipelineStepsForTask(task);
   const { status, currentAgent } = task;
   const agent = String(currentAgent || "");
+  const isCloser = task.isMicroCloser === true;
 
-  if (status === "done") return 5;
-  if (status === "review") return 4;
-  if (status === "testing") {
-    if (agent.includes("QA")) return 3;
-    return 2;
+  if (status === "done") return steps.length - 1;
+  if (status === "review") {
+    const idx = steps.findIndex((s) => s.key === "review");
+    return idx >= 0 ? idx : steps.length - 2;
   }
-  if (status === "development") return 1;
-  if (status === "planning") return 0;
+  if (status === "testing") {
+    if (isCloser && agent.includes("QA")) {
+      return steps.findIndex((s) => s.key === "qa");
+    }
+    if (isCloser) return steps.findIndex((s) => s.key === "test_run");
+    return steps.findIndex((s) => s.key === "development");
+  }
+  if (status === "development") return steps.findIndex((s) => s.key === "development");
+  if (status === "planning") return steps.findIndex((s) => s.key === "planning");
   return -2;
 }
 
 /**
- * @param {{ status?: string, currentAgent?: string } | null | undefined} task
+ * @param {{ status?: string, currentAgent?: string, isMicroCloser?: boolean } | null | undefined} task
  * @param {number} stepIndex
  * @returns {"completed" | "active" | "pending" | "failed"}
  */
@@ -67,19 +85,20 @@ export function isPipelineRunning(task) {
 }
 
 /**
- * @param {{ status?: string, currentAgent?: string } | null | undefined} runtime
+ * @param {{ status?: string, currentAgent?: string, isMicroCloser?: boolean } | null | undefined} runtime
  */
 export function buildPipelineSummary(runtime) {
+  const stepsDef = getPipelineStepsForTask(runtime);
   const activeStepIndex = runtime ? getActiveStepIndex(runtime) : -2;
-  const steps = PIPELINE_STEPS.map((step, i) => ({
+  const steps = stepsDef.map((step, i) => ({
     key: step.key,
     label: step.label,
     short: step.short,
     state: getStepVisualState(runtime, i),
   }));
   const activeStep =
-    activeStepIndex >= 0 && activeStepIndex < PIPELINE_STEPS.length
-      ? PIPELINE_STEPS[activeStepIndex]
+    activeStepIndex >= 0 && activeStepIndex < stepsDef.length
+      ? stepsDef[activeStepIndex]
       : null;
   return {
     activeStepIndex,

@@ -44,17 +44,31 @@ O Dev Agent deve:
 
 Não há passo separado de build no orquestrador: a compilação é critério de saída do Dev (abordagem soft). Erros de compilação não devem ser deixados para o QA.
 
+## Testes e QA
+
+**Tasks intermediárias:** o orquestrador **não** executa `npm test` nem QA Agent — só Dev, push e PR.
+
+**Task de fechamento (`isMicroCloser`):** após Dev, o orquestrador:
+1. Corre **Micro QA Refresh** (atualiza `acceptance` / `testStrategy` no micro)
+2. Executa `npm test` sobre o código integrado na branch `tech-lead`
+3. Chama o QA Agent com critérios do **micro**
+
+Veredito do micro: `reports/scopes/<MICRO-ID>-qa-verdict.json`  
+Relatório QA do micro: `reports/scopes/<MICRO-ID>-qa.md`
+
+### QA por task (legado / referência)
+
+Para tasks antigas ou prompts explícitos por task:
+- `reports/tasks/TASK-ID-qa-verdict.json`
+- `reports/tasks/TASK-ID-qa.md`
+
 O QA Agent deve:
-- ler `evidence/tests/TASK-ID-test-output.txt` quando existir (o orquestrador gera a evidência antes do QA)
-- gravar `reports/tasks/TASK-ID-qa.md` com exit code, falhas e observações
-- gravar **`reports/tasks/TASK-ID-qa-verdict.json`** com JSON `{ "verdict": "pass"|"fail", "summary": "..." }` — o orquestrador **só** chama o Reviewer se `verdict` for `pass`; se for `fail`, o Dev corrige e o ciclo **testes → QA** repete (limite: variável de ambiente `MAX_QA_FAILURE_RETRIES`, predefinição 5 rejeições após a primeira QA)
+- ler `evidence/tests/TASK-ID-test-output.txt` quando existir (gerado na task de fechamento)
+- gravar veredito JSON — na closer, usar path do **micro** (ver acima)
+- se `verdict` for `fail`, o Dev corrige e o ciclo **testes → QA** repete (limite: `MAX_QA_FAILURE_RETRIES`, predefinição 3)
 
 Nunca declarar testes como aprovados sem evidência.
 Se o terminal for recusado, registar isso claramente.
 
-## Testes
-
-Os testes são executados pelo orquestrador local, não pelo agente.
-
-O arquivo bruto de evidência pode ser apagado após o QA e Reviewer.
+O arquivo bruto de evidência pode ser apagado após o QA.
 O relatório QA deve preservar o resultado relevante.

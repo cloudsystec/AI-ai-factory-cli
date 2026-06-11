@@ -203,6 +203,99 @@ function normalizeMicroApproval() {
   writeMicros(freezeApprovedMicros(currentMicros, normalized));
 }
 
+function normalizeMicroQaFields() {
+  const currentMicros = readMicros();
+  const normalized = currentMicros.map((micro) => {
+    const acceptance = Array.isArray(micro.acceptance)
+      ? micro.acceptance
+      : typeof micro.acceptance === "string" && micro.acceptance.trim()
+        ? [micro.acceptance.trim()]
+        : [];
+    const testStrategy =
+      typeof micro.testStrategy === "string" && micro.testStrategy.trim()
+        ? micro.testStrategy.trim()
+        : micro.testStrategy || `npm test --prefix workspaces/${project}`;
+    return { ...micro, acceptance, testStrategy };
+  });
+  writeMicros(freezeApprovedMicros(currentMicros, normalized));
+}
+
+function nextTaskId(existingIds) {
+  let n = 1;
+  while (existingIds.has(`TASK-${String(n).padStart(3, "0")}`)) n += 1;
+  return `TASK-${String(n).padStart(3, "0")}`;
+}
+
+function normalizeMicroCloserTasks(microId) {
+  const micros = readMicros();
+  const micro = micros.find((m) => m.id === microId);
+  if (!micro) return;
+
+  const backlog = readBacklog();
+  const allTasks = backlog.tasks;
+  const microTasks = allTasks.filter((t) => t.sourceMicroId === microId);
+  if (microTasks.length === 0) return;
+
+  const existingIds = new Set(allTasks.map((t) => t.id));
+  let closers = microTasks.filter((t) => t.isMicroCloser === true);
+  const nonCloser = microTasks.filter((t) => t.isMicroCloser !== true);
+
+  let changed = false;
+  let updatedTasks = [...allTasks];
+
+  if (closers.length > 1) {
+    const keep = closers.find((t) => t.status !== "done") || closers[0];
+    updatedTasks = updatedTasks.map((t) => {
+      if (t.sourceMicroId === microId && t.isMicroCloser && t.id !== keep.id) {
+        changed = true;
+        const { isMicroCloser, ...rest } = t;
+        return rest;
+      }
+      return t;
+    });
+    closers = [keep];
+  }
+
+  if (closers.length === 0) {
+    const closerId = nextTaskId(existingIds);
+    const deps = nonCloser.map((t) => t.id);
+    const closerTask = {
+      id: closerId,
+      project,
+      sourceMicroId: microId,
+      title: `Integração e validação QA — ${micro.title || microId}`,
+      description: `Consolidar e validar o incremento integrado do micro "${micro.title || microId}". Critérios QA vêm do micro (acceptance/testStrategy).`,
+      acceptance: [],
+      dependencies: deps,
+      isMicroCloser: true,
+      status: "pending_validation",
+      approved: false,
+      validationStatus: "pending_validation",
+      priority: Math.max(0, ...microTasks.map((t) => t.priority ?? 0)) + 1,
+    };
+    updatedTasks.push(closerTask);
+    changed = true;
+  } else {
+    const closer = closers[0];
+    const expectedDeps = nonCloser.map((t) => t.id).sort().join(",");
+    const actualDeps = (Array.isArray(closer.dependencies) ? closer.dependencies : [])
+      .sort()
+      .join(",");
+    if (expectedDeps !== actualDeps) {
+      updatedTasks = updatedTasks.map((t) =>
+        t.id === closer.id
+          ? { ...t, dependencies: nonCloser.map((x) => x.id) }
+          : t
+      );
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    writeBacklog(freezeApprovedTasks(allTasks, updatedTasks));
+  }
+}
+
 function normalizeTaskApproval() {
   const currentTasks = readBacklog().tasks;
 
@@ -323,6 +416,8 @@ Regras:
   - macroId
   - title
   - description
+  - acceptance (array — critérios QA do micro)
+  - testStrategy (comando de teste integrado)
   - dependencies
   - risks
   - status
@@ -636,7 +731,10 @@ Formato obrigatório do backlog:
 }
 
 Regras:
-- **2-5 tasks por micro** (mínimo 2, máximo 5); se o micro só teria 1 task, o micro deveria ter sido maior.
+- **2-5 tasks intermediárias por micro** + **1 task de fechamento** com `isMicroCloser: true`.
+- A task de fechamento deve ter `dependencies` com IDs de **todas** as outras tasks do micro.
+- Título da closer: `Integração e validação QA — {título do micro}`.
+- Tasks intermediárias: **sem** `isMicroCloser`, **sem** `testStrategy` (QA e testes só na closer / no micro).
 - Cada task deve ser entregável de forma independente dentro do contexto do micro.
 - NÃO crie tasks "de documentação" ou "setup" isoladas — integre-as na task funcional.
 - Tasks devem gerar **mudança em código** (\`src/\` ou equivalente) ou **testes**; \`docs/\` só como suporte, não entrega única.
@@ -656,11 +754,13 @@ Regras:
   - description
   - acceptance
   - dependencies
-  - testStrategy
+  - isMicroCloser (true apenas na task final de fechamento)
   - status
   - approved
   - validationStatus
   - priority
+
+(Não incluir testStrategy nas tasks — critérios de teste ficam no micro.)
 
 Valores iniciais para task nova:
 - status: "pending_validation"
@@ -670,6 +770,9 @@ Valores iniciais para task nova:
   undefined,
   { step: "task_generation", microId: targetMicro.id }
 );
+
+normalizeMicroQaFields();
+normalizeMicroCloserTasks(targetMicro.id);
 
 /**
  * FASE 5 — Validar tasks somente se houver algo não aprovado.
@@ -749,7 +852,8 @@ Regras:
 - NÃO altere tasks done.
 - NÃO altere tasks já aprovadas.
 - Reprove tasks vagas, grandes demais ou sem critério de aceite testável.
-- Reprove tasks sem estratégia de teste.
+- Tasks intermediárias **não** precisam de testStrategy (QA e testes ficam no micro / task de fechamento).
+- Reprove a task de fechamento se não tiver isMicroCloser=true ou dependências de todas as irmãs.
 - Reprove tasks que misturam responsabilidades.
 - Reprove tasks desalinhadas com a arquitetura do projeto.
 - Se uma task estiver boa, atualize no backlog:

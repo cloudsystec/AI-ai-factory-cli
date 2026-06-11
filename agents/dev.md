@@ -8,6 +8,11 @@ Função:
   * criar projeto com padrão swagger
 - Rodar validações.
 
+## Tasks intermediárias vs task de fechamento
+
+- **Tasks intermediárias:** o orquestrador **não** executa `npm test` nem QA Agent — só Dev, push e PR. Valide com build local; testes integrados ficam para a task de fechamento.
+- **Task de fechamento (`isMicroCloser`):** após Dev, o orquestrador corre testes integrados e QA do micro completo.
+
 ## Compilação (obrigatório antes de encerrar)
 
 Antes de considerar a entrega pronta para o QA:
