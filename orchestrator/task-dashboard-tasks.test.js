@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   buildDashboardTasks,
+  isBacklogKanbanVisible,
   isBacklogTodoApproved,
 } from "./task-dashboard-tasks.js";
 import { taskStateFile, workspaceRoot } from "./project-paths.js";
@@ -20,6 +21,17 @@ test("isBacklogTodoApproved", () => {
   );
   assert.strictEqual(
     isBacklogTodoApproved({ status: "done", validationStatus: "approved" }),
+    false
+  );
+});
+
+test("isBacklogKanbanVisible inclui in_progress", () => {
+  assert.strictEqual(
+    isBacklogKanbanVisible({ status: "in_progress", validationStatus: "approved" }),
+    true
+  );
+  assert.strictEqual(
+    isBacklogKanbanVisible({ status: "todo", validationStatus: "pending_validation" }),
     false
   );
 });
@@ -90,6 +102,29 @@ test("buildDashboardTasks: inclui todo+approved do backlog sem entrada no runtim
   assert.strictEqual(byId["bs-pending-01"], undefined, "task sem TL não entra");
   assert.strictEqual(byId["bs-runtime-01"].status, "development", "runtime prevalece");
   assert.strictEqual(byId["bs-runtime-01"].backlogReady, undefined);
+
+  writeBacklogFile(backlogPath, {
+    project,
+    macroId: project,
+    tasks: [
+      ...JSON.parse(fs.readFileSync(backlogPath, "utf-8")).tasks,
+      {
+        id: "bs-inprog-01",
+        project,
+        title: "A arrancar",
+        status: "in_progress",
+        validationStatus: "approved",
+        approved: true,
+      },
+    ],
+  });
+  fs.writeFileSync(statePath, "[]", "utf-8");
+
+  const withInProgress = buildDashboardTasks(project);
+  const inProg = withInProgress.find((r) => r.id === "bs-inprog-01");
+  assert.ok(inProg, "task in_progress no backlog deve aparecer");
+  assert.strictEqual(inProg.status, "in_progress");
+  assert.strictEqual(inProg.backlogInProgress, true);
 
   fs.rmSync(root, { recursive: true, force: true });
 });

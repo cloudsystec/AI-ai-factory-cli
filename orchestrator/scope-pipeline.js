@@ -597,6 +597,12 @@ log.phase("FASE 4: Gerando tasks entregáveis");
 
 const currentBacklog = readBacklog();
 
+const copilotInstructions = String(
+  process.env.AI_FACTORY_COPILOT_INSTRUCTIONS || ""
+).trim();
+const replaceMicroTasks =
+  process.env.AI_FACTORY_REPLACE_MICRO_TASKS === "1";
+
 runAgent(
   "agents/micro-to-tasks.md",
   `
@@ -614,6 +620,7 @@ ${JSON.stringify(targetMicro, null, 2)}
 
 Contexto — microescopos aprovados (somente leitura; não crie tasks fora do alvo):
 ${JSON.stringify(getApprovedMicros(), null, 2)}
+${copilotInstructions ? `\nInstruções do utilizador (Copiloto):\n${copilotInstructions}\n` : ""}${replaceMicroTasks ? `\nModo replaceMicroTasks: o backlog deste micro foi limpo pelo painel — gere um conjunto NOVO de tasks (2-5) para o micro alvo.\n` : ""}
 
 Crie ou atualize o backlog:
 ${backlogFile}

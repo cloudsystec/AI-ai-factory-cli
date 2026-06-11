@@ -138,6 +138,12 @@ export async function runJobLocally(job, onLine) {
   if (job.kind === "scope-tasks-only" && job.payload?.microId) {
     env.AI_FACTORY_TARGET_MICRO_ID = String(job.payload.microId);
   }
+  if (job.payload?.copilotInstructions) {
+    env.AI_FACTORY_COPILOT_INSTRUCTIONS = String(job.payload.copilotInstructions);
+  }
+  if (job.payload?.replaceMicroTasks === true) {
+    env.AI_FACTORY_REPLACE_MICRO_TASKS = "1";
+  }
 
   return new Promise((resolve, reject) => {
     log.info("Executar comando", { command: built.command });

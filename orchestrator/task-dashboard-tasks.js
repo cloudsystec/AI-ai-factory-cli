@@ -28,18 +28,30 @@ function loadRuntimeTasks(project) {
 }
 
 /**
+ * Task do backlog visível no Kanban (runtime prevalece quando existir).
+ * @param {{ status?: string, validationStatus?: string }} task
+ */
+export function isBacklogKanbanVisible(task) {
+  if (task.status === "in_progress") return true;
+  return isBacklogTodoApproved(task);
+}
+
+/**
  * @param {string} project
  * @param {object} backlogTask
  */
 function backlogRowToDashboard(project, backlogTask) {
+  const status =
+    backlogTask.status === "in_progress" ? "in_progress" : "todo";
   return {
     id: backlogTask.id,
     title: backlogTask.title ?? backlogTask.id,
     project: backlogTask.project ?? project,
-    status: "todo",
+    status,
     currentAgent: null,
     updatedAt: backlogTask.updatedAt ?? null,
-    backlogReady: true,
+    backlogReady: status === "todo",
+    backlogInProgress: status === "in_progress",
   };
 }
 
@@ -62,7 +74,7 @@ export function buildDashboardTasks(project) {
   if (fs.existsSync(backlogPath)) {
     const doc = readBacklogFile(backlogPath, { project });
     backlogReady = doc.tasks
-      .filter((t) => isBacklogTodoApproved(t) && !runtimeIds.has(t.id))
+      .filter((t) => isBacklogKanbanVisible(t) && !runtimeIds.has(t.id))
       .map((t) => backlogRowToDashboard(project, t));
   }
 
