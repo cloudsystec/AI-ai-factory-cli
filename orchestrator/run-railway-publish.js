@@ -15,7 +15,7 @@ import {
   enrichReadinessFromStackProfile,
 } from "./deploy-stack-analyzer.js";
 import { readGlobalRules, readAgentFile, systemSecurityRules } from "./agent-prompts.js";
-import { runCursorAgent } from "./cursor-agent-runner.js";
+import { runAgent } from "./agent-runner.js";
 import { syncDeployRepo } from "./git/sync-deploy-repo.js";
 import { verifyDeployLive } from "./deploy-live-verify.js";
 import {
@@ -360,7 +360,7 @@ function readDockerfileSnippet(ws) {
  * @param {{ cycle: number, lastReadiness?: Record<string, unknown>|null, runtimeError?: string|null, verifyError?: string|null }} ctx
  * @param {(line: string) => void} onLine
  */
-function runDeployAgent(project, ws, preview, stackProfile, ctx, onLine) {
+async function runDeployAgent(project, ws, preview, stackProfile, ctx, onLine) {
   const agentRules = readAgentFile("agents/deploy-railway.md");
   const globalRules = readGlobalRules();
 
@@ -436,7 +436,7 @@ ${retrySection}
 `.trim();
 
   onLine(`[agent] deploy-railway (ciclo ${ctx.cycle})…\n`);
-  runCursorAgent({
+  await runAgent({
     agentFile: "agents/deploy-railway.md",
     agentName: "deploy-railway",
     prompt,
@@ -453,7 +453,7 @@ ${retrySection}
  * @param {string} error
  * @param {(line: string) => void} onLine
  */
-function runDeployFixAgent(project, ws, preview, error, onLine) {
+async function runDeployFixAgent(project, ws, preview, error, onLine) {
   const agentRules = readAgentFile("agents/deploy-railway.md");
   const globalRules = readGlobalRules();
 
@@ -494,7 +494,7 @@ Marca \`verdict: deployable\` quando estiver pronto. Não termines sem corrigir.
 `.trim();
 
   onLine(`[fix-agent] corrigir: ${error.slice(0, 120)}…\n`);
-  runCursorAgent({
+  await runAgent({
     agentFile: "agents/deploy-railway.md",
     agentName: "deploy-railway",
     prompt,
@@ -634,7 +634,7 @@ export async function run(job, onLine = () => {}) {
     onLine(`[stack] ${stackProfile.summary} → topology=${stackProfile.suggestedTopology}\n`);
 
     try {
-      runDeployAgent(
+      await runDeployAgent(
         project,
         ws,
         preview,
@@ -688,12 +688,12 @@ export async function run(job, onLine = () => {}) {
 
         if (fix < MAX_INLINE_FIX_ATTEMPTS && isVerifyFailure) {
           const fixError = await enrichErrorWithRailwayBuildLogs(project, msg, onLine);
-          runDeployFixAgent(project, ws, preview, fixError, onLine);
+          await runDeployFixAgent(project, ws, preview, fixError, onLine);
           continue;
         }
         if (fix < MAX_INLINE_FIX_ATTEMPTS && !isInfraProvisionError(msg)) {
           const fixError = await enrichErrorWithRailwayBuildLogs(project, msg, onLine);
-          runDeployFixAgent(project, ws, preview, fixError, onLine);
+          await runDeployFixAgent(project, ws, preview, fixError, onLine);
           continue;
         }
         onLine(`[pipeline] esgotadas correcções inline — novo ciclo completo\n`);

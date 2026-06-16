@@ -21,6 +21,8 @@ Este repositório é o **cliente** que corre na infraestrutura do tenant (ou do 
 | **Cursor (execução)** | *(por job / slot)* | `CURSOR_API_KEY` do **bot** do slot — enviada no `POST /worker/claim`, não no `.env` |
 | **Billing** | `CURSOR_USAGE_EMAIL` | Email do **bot** que executou o job (match na Admin API) |
 | **Cursor CLI** | `CURSOR_AGENT` (opcional) | Default na imagem: `agent` com `-p --trust --force` (headless) |
+| **Luna** (alternativa ao Cursor) | `LUNA_BASE_URL` | Serviço **separado** (`ai-factory-luna`, :8000). Dev: `http://ai-factory-luna:8000` na rede `ai-factory-net`. **Não** incluir Luna neste compose — só a URL. |
+| **Modo agente** | `AI_FACTORY_BOT_MODE` | Injectado pelo worker a partir da BD (`bot_mode`: `cursor` \| `luna`). |
 | **Logs** | `AI_FACTORY_LOG_COLOR`, `AI_FACTORY_LOG_LEVEL` | Cores em `docker logs` (default `COLOR=1` na imagem) |
 
 Sem `REDIS_URL` o worker não arranca.

@@ -28,6 +28,7 @@ const {
   claimJob,
   completeJob,
   fetchBotsReady,
+  fetchPlatformConfig,
   heartbeat,
   registerWorker,
   reportRuntimeSync,
@@ -57,11 +58,89 @@ const log = createLogger("worker");
 const TENANT_PREFIX = TENANT_ID.slice(0, 8);
 const POLL_MS = Number(process.env.CLAIM_POLL_MS || 1000);
 const IDLE_POLL_MS = Number(process.env.IDLE_CLAIM_POLL_MS || 5000);
+
+/** Jobs que correm sem Play activo (alinhado com STANDALONE_CLAIM_KINDS no back). */
+const STANDALONE_JOB_KINDS = new Set([
+  "provision",
+  "git-migrate",
+  "railway-publish",
+  "design-preview",
+  "design-infra",
+  "planning-chat-layout",
+  "planning-chat-infra",
+]);
 const DASHBOARD_SYNC_MS = Number(process.env.DASHBOARD_SYNC_MS || 5000);
 const BOTS_READY_REFRESH_MS = Number(
   process.env.BOTS_READY_REFRESH_MS || 300_000
 );
 const RUNTIME_SYNC_MS = Number(process.env.RUNTIME_SYNC_MS || 15_000);
+const PLATFORM_CONFIG_REFRESH_MS = Number(
+  process.env.PLATFORM_CONFIG_REFRESH_MS || 60_000
+);
+
+/** @type {{ botMode: string, lunaModelRouting: object } | null} */
+let cachedPlatformConfig = null;
+
+async function refreshPlatformConfig() {
+  try {
+    const cfg = await fetchPlatformConfig();
+    cachedPlatformConfig = {
+      botMode: String(cfg.botMode || "cursor"),
+      lunaModelRouting: cfg.lunaModelRouting || { defaultProfile: "planning" },
+    };
+    applyPlatformConfigEnv(cachedPlatformConfig);
+    if (cachedPlatformConfig.botMode === "luna") {
+      await checkLunaHealth();
+    }
+    return cachedPlatformConfig;
+  } catch (e) {
+    log.warn("platform-config refresh falhou", { error: e.message });
+    return cachedPlatformConfig;
+  }
+}
+
+/**
+ * @param {{ botMode?: string, lunaModelRouting?: object }} cfg
+ */
+function applyPlatformConfigEnv(cfg) {
+  if (!cfg) return;
+  process.env.AI_FACTORY_BOT_MODE = String(cfg.botMode || "cursor");
+  if (cfg.lunaModelRouting) {
+    process.env.AI_FACTORY_LUNA_ROUTING = JSON.stringify(cfg.lunaModelRouting);
+  }
+}
+
+async function checkLunaHealth() {
+  const base = String(process.env.LUNA_BASE_URL || "").replace(/\/$/, "");
+  if (!base) {
+    log.warn("Luna: LUNA_BASE_URL ausente (bot_mode=luna)");
+    return;
+  }
+  try {
+    const res = await fetch(`${base}/health`, { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) {
+      log.warn("Luna health check falhou", { status: res.status, url: base });
+    }
+  } catch (e) {
+    log.warn("Luna inacessível no arranque", { url: base, error: e.message });
+  }
+}
+
+/**
+ * @param {object} [fromClaim]
+ */
+function mergePlatformConfig(fromClaim) {
+  if (fromClaim?.botMode) {
+    cachedPlatformConfig = {
+      botMode: fromClaim.botMode,
+      lunaModelRouting:
+        fromClaim.lunaModelRouting ||
+        cachedPlatformConfig?.lunaModelRouting ||
+        { defaultProfile: "planning" },
+    };
+    applyPlatformConfigEnv(cachedPlatformConfig);
+  }
+}
 
 /** @type {Map<number, boolean>} */
 const runningBySlot = new Map();
@@ -181,6 +260,19 @@ function applyJobBillingEnv(job) {
     tenantRoot,
     "billing-sessions"
   );
+  if (job.platformConfig) {
+    mergePlatformConfig(job.platformConfig);
+  } else if (cachedPlatformConfig) {
+    applyPlatformConfigEnv(cachedPlatformConfig);
+  }
+  if (job.kind) {
+    process.env.AI_FACTORY_JOB_KIND = job.kind;
+  }
+  if (job.aiProvider) {
+    process.env.AI_FACTORY_JOB_AI_PROVIDER = job.aiProvider;
+  } else {
+    delete process.env.AI_FACTORY_JOB_AI_PROVIDER;
+  }
   if (job.cursorApiKey) {
     process.env.CURSOR_API_KEY = job.cursorApiKey;
   }
@@ -478,18 +570,27 @@ async function slotHasPlay(slot) {
   }
 }
 
-async function tryClaimInfra(slot, workerId) {
+async function tryClaimStandalone(slot, workerId) {
   try {
     const claimed = await claimJob(workerId, { provisionOnly: true });
     if (claimed.error === "bot_not_configured") return false;
     const job = claimed.job;
-    if (
-      !job ||
-      !["provision", "git-migrate", "railway-publish"].includes(job.kind)
-    ) {
+    if (!job || !STANDALONE_JOB_KINDS.has(job.kind)) {
+      if (job) {
+        await completeJob(job.id, {
+          status: "failed",
+          exitCode: 1,
+          error: `Worker não executa job kind=${job.kind}`,
+        }).catch((e) =>
+          log.warn("Falha ao libertar job não suportado", {
+            jobId: job.id,
+            error: e.message,
+          })
+        );
+      }
       return false;
     }
-    log.info("Infra job claimed", {
+    log.info("Standalone job claimed", {
       slot,
       jobId: job.id,
       kind: job.kind,
@@ -505,7 +606,7 @@ async function tryClaimInfra(slot, workerId) {
     });
     return true;
   } catch (e) {
-    log.warn("Provision claim falhou", { slot, error: e.message });
+    log.warn("Standalone claim falhou", { slot, error: e.message });
     return false;
   }
 }
@@ -517,8 +618,8 @@ async function loopForSlot(slot) {
   const inPlay = await slotHasPlay(slot);
 
   if (!inPlay) {
-    const didInfra = await tryClaimInfra(slot, workerId);
-    if (didInfra) return 0;
+    const didStandalone = await tryClaimStandalone(slot, workerId);
+    if (didStandalone) return 0;
     return IDLE_POLL_MS;
   }
 
@@ -536,13 +637,18 @@ async function loopForSlot(slot) {
       log.warn("Bot não configurado para slot", { slot });
       return IDLE_POLL_MS;
     }
+    mergePlatformConfig(claimed.platformConfig);
     let job = claimed.job;
     if (!job) {
       await dispatchTick(workerId).catch(() => {});
       claimed = await claimJob(workerId);
+      mergePlatformConfig(claimed.platformConfig);
       job = claimed.job;
     }
     if (!job) return POLL_MS;
+    if (claimed.platformConfig) {
+      job.platformConfig = claimed.platformConfig;
+    }
     log.info("Job claimed", {
       slot,
       jobId: job.id,
@@ -633,6 +739,7 @@ async function main() {
     color: process.env.AI_FACTORY_LOG_COLOR !== "0",
   });
   await refreshActiveSlots();
+  await refreshPlatformConfig();
   await ensureGitProvision().catch((e) =>
     log.warn("ensure-git-provision falhou", { error: e.message })
   );
@@ -643,6 +750,7 @@ async function main() {
   setInterval(() => refreshActiveSlots().catch((e) => {
     log.warn("Refresh bots-ready falhou", { error: e.message });
   }), BOTS_READY_REFRESH_MS);
+  setInterval(() => refreshPlatformConfig().catch(() => {}), PLATFORM_CONFIG_REFRESH_MS);
 }
 
 main().catch((e) => {

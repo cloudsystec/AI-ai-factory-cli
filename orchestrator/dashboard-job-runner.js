@@ -88,6 +88,30 @@ export function buildJobCommand(kind, project, macroId, taskId) {
         argv: ["orchestrator/run-task.js", project, taskId],
         executable: "node",
       };
+    case "design-preview":
+      return {
+        command: `node orchestrator/run-design-preview.js ${project}`,
+        argv: ["orchestrator/run-design-preview.js", project],
+        executable: "node",
+      };
+    case "design-infra":
+      return {
+        command: `node orchestrator/run-design-infra.js ${project}`,
+        argv: ["orchestrator/run-design-infra.js", project],
+        executable: "node",
+      };
+    case "planning-chat-layout":
+      return {
+        command: `node orchestrator/run-planning-chat.js ${project} layout`,
+        argv: ["orchestrator/run-planning-chat.js", project, "layout"],
+        executable: "node",
+      };
+    case "planning-chat-infra":
+      return {
+        command: `node orchestrator/run-planning-chat.js ${project} infra`,
+        argv: ["orchestrator/run-planning-chat.js", project, "infra"],
+        executable: "node",
+      };
     default:
       throw new Error(`kind de job inválido: ${kind}`);
   }

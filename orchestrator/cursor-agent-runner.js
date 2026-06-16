@@ -58,7 +58,7 @@ export function runCursorAgent(opts) {
     }
     recordAiCallEnd(callId);
     settleAiCall(callId);
-    return;
+    return "";
   }
 
   log.debug(`Chamada IA iniciada`, {
@@ -99,11 +99,13 @@ export function runCursorAgent(opts) {
       );
     }
     const elapsedMs = Date.now() - startMs;
+    const stdout = String(result.stdout || "").trim();
     log.debug(`Chamada IA concluída`, {
       agent: label,
       elapsedMs,
       elapsedSec: `${(elapsedMs / 1000).toFixed(1)}s`,
     });
+    return stdout;
   } catch (err) {
     const elapsedMs = Date.now() - startMs;
     log.warn(`Chamada IA falhou`, {

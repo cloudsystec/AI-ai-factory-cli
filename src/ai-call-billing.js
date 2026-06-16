@@ -49,7 +49,7 @@ const RECONCILE_PASS2_DELAY_MS = Number(
 );
 
 /** @type {Set<string>} */
-const CONFIRMED_CHARGE_SOURCES = new Set(["cursor_admin_api"]);
+const CONFIRMED_CHARGE_SOURCES = new Set(["cursor_admin_api", "luna_metered"]);
 
 /**
  * @param {string[]} sources
@@ -57,7 +57,12 @@ const CONFIRMED_CHARGE_SOURCES = new Set(["cursor_admin_api"]);
 export function aggregateJobChargeSource(sources) {
   const list = sources.filter(Boolean);
   if (list.length === 0) return "estimate";
-  if (list.every((s) => CONFIRMED_CHARGE_SOURCES.has(s))) return "cursor_admin_api";
+  if (list.every((s) => CONFIRMED_CHARGE_SOURCES.has(s))) {
+    if (list.every((s) => s === "luna_metered")) return "luna_metered";
+    if (list.every((s) => s === "cursor_admin_api")) return "cursor_admin_api";
+    return "luna_metered";
+  }
+  if (list.some((s) => s === "luna_metered")) return "luna_metered";
   if (list.some((s) => s === "estimate_reconcile" || s === "estimate_error"))
     return "estimate_reconcile";
   if (list.some((s) => s === "token_preview")) return "token_preview";

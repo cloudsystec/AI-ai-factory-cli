@@ -1,5 +1,5 @@
 import { readGlobalRules, systemSecurityRules } from "./agent-prompts.js";
-import { runCursorAgent } from "./cursor-agent-runner.js";
+import { runAgent } from "./agent-runner.js";
 import { createLogger } from "../src/logger.js";
 
 const log = createLogger("error-recovery");
@@ -39,7 +39,7 @@ export function maxErrorRecoveryAttempts() {
  *   reportRootPrompt: string,
  * }} opts
  */
-export function attemptErrorRecovery(opts) {
+export async function attemptErrorRecovery(opts) {
   const { roleFile, agentName, error, task, project, step, reportRootPrompt } = opts;
 
   const prompt = `
@@ -74,7 +74,7 @@ ${systemSecurityRules()}
     error: error?.message?.slice(0, 120),
   });
 
-  runCursorAgent({
+  await runAgent({
     agentFile: "agents/error-recovery.md",
     agentName: "Error Recovery",
     prompt,
@@ -97,19 +97,19 @@ ${systemSecurityRules()}
  * }} ctx
  * @returns {T}
  */
-export function runWithErrorRecovery(fn, ctx) {
+export async function runWithErrorRecovery(fn, ctx) {
   const max = maxErrorRecoveryAttempts();
   let lastError;
 
   for (let attempt = 0; attempt <= max; attempt++) {
     try {
-      return fn();
+      return await fn();
     } catch (error) {
       lastError = error;
       if (!isRecoverableError(error) || attempt >= max) {
         throw error;
       }
-      attemptErrorRecovery({ ...ctx, error });
+      await attemptErrorRecovery({ ...ctx, error });
       log.info("Re-tentando agente após recuperação", {
         task: ctx.task.id,
         agent: ctx.agentName,

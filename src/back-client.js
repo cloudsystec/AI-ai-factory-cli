@@ -121,8 +121,17 @@ export async function claimJob(workerId, opts = {}) {
     job: data.job ?? null,
     botEmail: data.botEmail ?? data.job?.botEmail ?? null,
     workerSlot: data.workerSlot ?? data.job?.workerSlot,
+    platformConfig: data.platformConfig ?? data.job?.platformConfig ?? null,
     error: data.error,
   };
+}
+
+/**
+ * @returns {Promise<{ botMode: string, lunaUsdPerMillionTokens: number, lunaModelRouting: object }>}
+ */
+export async function fetchPlatformConfig() {
+  const res = await backFetch("/worker/platform-config");
+  return res.json();
 }
 
 /**

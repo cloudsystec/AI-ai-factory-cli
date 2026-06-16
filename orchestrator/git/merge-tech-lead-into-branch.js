@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { gitExec } from "./git-exec.js";
 import { workspaceRoot } from "../project-paths.js";
-import { runCursorAgent } from "../cursor-agent-runner.js";
+import { runAgent } from "../agent-runner.js";
 
 function refreshRemoteToken(project, repoFullName, token) {
   const cacheDir = path.join(workspaceRoot(project), ".git-cache");
@@ -95,7 +95,7 @@ ${conflictDetails}
 
     onLine(`[git] resolvendo conflitos com IA…\n`);
     try {
-      runCursorAgent({
+      await runAgent({
         agentFile: "agents/dev.md",
         agentName: "Conflict Resolver",
         prompt,

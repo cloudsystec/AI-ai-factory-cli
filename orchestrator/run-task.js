@@ -13,7 +13,7 @@ import {
 import { readBacklogFile, writeBacklogFile } from "./backlog-io.js";
 import { qaVerdictFile, clearMicroQaVerdict, readMicroQaVerdict, microQaVerdictFile } from "./qa-verdict.js";
 import { readAgentFile, readGlobalRules, systemSecurityRules } from "./agent-prompts.js";
-import { runCursorAgent } from "./cursor-agent-runner.js";
+import { runAgent as executeAgent } from "./agent-runner.js";
 import { runWithErrorRecovery } from "./error-recovery.js";
 import { syncTaskDeliveryFlags } from "./micro-delivery.js";
 import { shouldRunTaskQa } from "./micro-task-utils.js";
@@ -310,7 +310,7 @@ function shouldSkipAgents() {
     return v === "1" || v === "true";
 }
 
-function runAgent(roleFile, status, agentName, instruction, meta = {}) {
+async function runAgent(roleFile, status, agentName, instruction, meta = {}) {
     updateTaskState(status, agentName);
     log.debug(`Preparando agente`, { agent: agentName, role: roleFile, task: task.id });
 
@@ -353,9 +353,9 @@ ${systemSecurityRules()}
     console.log(`\n=== Rodando ${agentName} ===\n`);
 
     const agentStartMs = Date.now();
-    runWithErrorRecovery(
-        () =>
-            runCursorAgent({
+    await runWithErrorRecovery(
+        async () =>
+            await executeAgent({
                 agentFile: roleFile,
                 agentName,
                 prompt,
@@ -579,7 +579,7 @@ Esta é uma task intermediária — **não** há npm test nem QA Agent nesta exe
 Grave relatórios em ${reportRootPrompt}/reports/tasks/${task.id}-dev.md.
 Atualize ${reportRootPrompt}/docs/tasks/${task.id}.md com arquivos alterados e decisões.`;
 
-            runAgent(
+            await runAgent(
                 "agents/dev.md",
                 "development",
                 "Dev Agent",
@@ -594,7 +594,7 @@ Atualize ${reportRootPrompt}/docs/tasks/${task.id}.md com arquivos alterados e d
         // --- QA (apenas task de fechamento / isMicroCloser) ---
         if (runsTaskQa && (!shouldSkipStep("qa") || retryMode === "agent")) {
             if (!shouldSkipStep("qa")) {
-                runAgent(
+                await runAgent(
                     "agents/micro-qa-refresh.md",
                     "development",
                     "Micro QA Refresh",
@@ -651,7 +651,7 @@ Grave relatório em ${reportRootPrompt}/reports/scopes/${micro?.id || task.sourc
 
                 clearMicroQaVerdict(wsRoot, micro?.id || task.sourceMicroId);
 
-                runAgent(
+                await runAgent(
                     "agents/qa.md",
                     "testing",
                     "QA Agent",
@@ -703,7 +703,7 @@ Crie o ficheiro ${microQaVerdictRel} com JSON válido no formato:
                     `\n=== QA reprovou (ronda ${qaRound + 1}/${MAX_QA_FAILURE_RETRIES + 1}): ${verdict.summary}\n=== Dev: corrigir; em seguida novos testes + QA ===\n`
                 );
 
-                runAgent(
+                await runAgent(
                     "agents/dev.md",
                     "development",
                     "Dev Agent",

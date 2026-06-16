@@ -8,7 +8,7 @@ import {
   microScopeFile,
 } from "./project-paths.js";
 import { readAgentFile, readGlobalRules, systemSecurityRules } from "./agent-prompts.js";
-import { runCursorAgent } from "./cursor-agent-runner.js";
+import { runAgent as executeAgent } from "./agent-runner.js";
 import {
   flushPendingSettlements,
   installBillingSignalHandlers,
@@ -107,7 +107,7 @@ function shouldSkipAgents() {
   return v === "1" || v === "true";
 }
 
-function runAgent(agentFile, prompt, agentName, meta = {}) {
+async function runAgent(agentFile, prompt, agentName, meta = {}) {
   const label = agentName || agentFile;
   log.debug(`Preparando agente`, { agent: label, file: agentFile, promptLen: prompt.length });
 
@@ -126,7 +126,7 @@ ${systemSecurityRules()}
 `;
 
   const startMs = log.timerStart(`Agente ${label}`);
-  runCursorAgent({
+  await executeAgent({
     agentFile,
     agentName,
     prompt: fullPrompt,
@@ -381,7 +381,7 @@ const macroSimple = isMacroSimple(macroContent);
 if (!tasksOnly && !fs.existsSync(microFile)) {
   log.phase("FASE 1: Gerando microescopos");
 
-  runAgent(
+  await runAgent(
     "agents/macro-to-micro.md",
     `
 Projeto:
@@ -488,7 +488,7 @@ if (getMicrosToValidate().length === 0) {
       `${macroId}-po-validation-round-${round}.json`
     );
 
-    runAgent(
+    await runAgent(
       "agents/po-micro-validator.md",
       `
 Projeto:
@@ -558,7 +558,7 @@ Regras:
       (micro) => micro.validationStatus === "approved"
     );
 
-    runAgent(
+    await runAgent(
       "agents/micro-refiner.md",
       `
 Projeto:
@@ -623,7 +623,7 @@ if (approvedMicros.length === 0) {
  */
 log.phase("FASE 3: Priorizando microescopos aprovados");
 
-runAgent(
+await runAgent(
   "agents/micro-prioritizer.md",
   `
 Projeto:
@@ -698,7 +698,7 @@ const copilotInstructions = String(
 const replaceMicroTasks =
   process.env.AI_FACTORY_REPLACE_MICRO_TASKS === "1";
 
-runAgent(
+await runAgent(
   "agents/micro-to-tasks.md",
   `
 Projeto:
@@ -820,7 +820,7 @@ if (getTasksToValidateForMicro(targetMicro.id).length === 0) {
       `${macroId}-techlead-validation-round-${round}.json`
     );
 
-    runAgent(
+    await runAgent(
       "agents/techlead-task-validator.md",
       `
 Projeto:
@@ -902,7 +902,7 @@ Regras:
       return task.validationStatus === "approved" || task.status === "done";
     });
 
-    runAgent(
+    await runAgent(
       "agents/task-refiner.md",
       `
 Projeto:
@@ -963,7 +963,7 @@ Regras:
  */
 log.phase("FASE 6: Priorizando backlog final");
 
-runAgent(
+await runAgent(
   "agents/task-prioritizer.md",
   `
 Projeto:

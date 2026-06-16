@@ -9,6 +9,7 @@ services:
     environment:
       REDIS_URL: ${REDIS_URL:-redis://redis-stack:6379}
       BACK_URL: ${BACK_URL:-http://host.docker.internal:4000}
+      LUNA_BASE_URL: ${LUNA_BASE_URL:-http://ai-factory-luna:8000}
       AI_FACTORY_LOG_COLOR: "1"
       AI_FACTORY_LOG_LEVEL: ${AI_FACTORY_LOG_LEVEL:-debug}
       GIT_AUTHOR_NAME: "Factory Agent"
@@ -27,8 +28,11 @@ services:
     networks:
       - default
       - n8n-network
+      - ai-factory-net
 
 networks:
+  ai-factory-net:
+    external: true
   n8n-network:
     external: true
     name: n8n-network

@@ -16,6 +16,10 @@ const CURSOR_AGENT_JOB_KINDS = new Set([
   "develop",
   "task",
   "railway-publish",
+  "design-preview",
+  "design-infra",
+  "planning-chat-layout",
+  "planning-chat-infra",
 ]);
 
 /**
@@ -48,6 +52,10 @@ export async function runJobLocally(job, onLine) {
     "tech-lead-review",
     "micro-integration-qa",
     "micro-release",
+    "design-preview",
+    "design-infra",
+    "planning-chat-layout",
+    "planning-chat-infra",
   ]).has(job.kind);
 
   if (needsMacro && project) {
@@ -94,10 +102,20 @@ export async function runJobLocally(job, onLine) {
     ? path.join(tenantRoot, "billing-sessions")
     : undefined;
 
-  if (CURSOR_AGENT_JOB_KINDS.has(job.kind) && !job.cursorApiKey) {
-    throw new Error(
-      "Chave Cursor do executor em falta (grave a API key no utilizador executor ou reconecte Play)."
-    );
+  if (CURSOR_AGENT_JOB_KINDS.has(job.kind)) {
+    const jobProvider = String(
+      job.aiProvider ||
+        job.platformConfig?.jobAiProvider ||
+        process.env.AI_FACTORY_JOB_AI_PROVIDER ||
+        process.env.AI_FACTORY_BOT_MODE ||
+        job.platformConfig?.botMode ||
+        "cursor"
+    ).toLowerCase();
+    if (jobProvider !== "luna" && !job.cursorApiKey) {
+      throw new Error(
+        "Chave Cursor do executor em falta (grave a API key no utilizador executor ou reconecte Play)."
+      );
+    }
   }
 
   const env = { ...process.env };
@@ -116,6 +134,23 @@ export async function runJobLocally(job, onLine) {
   }
   if (billingSessionDir) {
     env.AI_FACTORY_BILLING_SESSION_DIR = billingSessionDir;
+  }
+  if (job.aiProvider) {
+    env.AI_FACTORY_JOB_AI_PROVIDER = job.aiProvider;
+  }
+  if (job.platformConfig?.botMode) {
+    env.AI_FACTORY_BOT_MODE = job.platformConfig.botMode;
+  } else if (process.env.AI_FACTORY_BOT_MODE) {
+    env.AI_FACTORY_BOT_MODE = process.env.AI_FACTORY_BOT_MODE;
+  }
+  if (process.env.AI_FACTORY_LUNA_ROUTING) {
+    env.AI_FACTORY_LUNA_ROUTING = process.env.AI_FACTORY_LUNA_ROUTING;
+  }
+  if (process.env.LUNA_BASE_URL) {
+    env.LUNA_BASE_URL = process.env.LUNA_BASE_URL;
+  }
+  if (job.kind) {
+    env.AI_FACTORY_JOB_KIND = job.kind;
   }
   if (project && process.env.AI_FACTORY_WORKSPACES_DIR) {
     env.AI_FACTORY_ACTIVE_PROJECT = project;
@@ -143,6 +178,9 @@ export async function runJobLocally(job, onLine) {
   }
   if (job.payload?.replaceMicroTasks === true) {
     env.AI_FACTORY_REPLACE_MICRO_TASKS = "1";
+  }
+  if (job.payload && typeof job.payload === "object" && Object.keys(job.payload).length > 0) {
+    env.AI_FACTORY_JOB_PAYLOAD = JSON.stringify(job.payload);
   }
 
   return new Promise((resolve, reject) => {
